@@ -20,7 +20,8 @@
         "url": "index.html",
         "resizable": true,
         "minWidth": 900,
-        "minHeight": 600
+        "minHeight": 600,
+        "visible": false
       }
     ],
     "security": {

@@ -248,7 +248,7 @@ fn update_platform_settings(
 }
 
 fn main() {
-    tauri::Builder::default()
+    autosync::with_plugins(tauri::Builder::default())
         .setup(|app| {
             let handle = app.handle().clone();
             app.manage(ProgressEmitter(Arc::new(move |event, payload| {
@@ -256,8 +256,26 @@ fn main() {
                     eprintln!("Failed to emit {event} event: {err}");
                 }
             })));
+            autosync::setup(app)?;
+
+            // The main window is created hidden (tauri.conf.json) so a start from Windows'
+            // autostart never flashes it. Autosync that did not start (no tray) never hides it.
+            let args: Vec<String> = std::env::args().collect();
+            let available = autosync::AVAILABLE
+                && app
+                    .try_state::<autosync::AutosyncHandle>()
+                    .is_some_and(|handle| autosync::runner::lock_status(&handle.status).available);
+            let autosync_enabled = Settings::new()
+                .map(|settings| settings.autosync.enabled)
+                .unwrap_or(false);
+            if !autosync::start_hidden(&args, available, autosync_enabled) {
+                if let Some(window) = app.get_webview_window(autosync::MAIN_LABEL) {
+                    window.show()?;
+                }
+            }
             Ok(())
         })
+        .on_window_event(autosync::on_window_event)
         .invoke_handler(tauri::generate_handler![
             load_settings,
             discover_games,
@@ -994,12 +1012,19 @@ mod tests {
             .expect("failed to build mock webview")
     }
 
+    /// The app's own origin. Since tauri 2.12 a request from any other origin needs a
+    /// capability even for app commands, and this origin differs per platform.
+    #[cfg(windows)]
+    const LOCAL_URL: &str = "http://tauri.localhost";
+    #[cfg(not(windows))]
+    const LOCAL_URL: &str = "tauri://localhost";
+
     fn invoke_request(cmd: &str) -> InvokeRequest {
         InvokeRequest {
             cmd: cmd.into(),
             callback: CallbackFn(0),
             error: CallbackFn(1),
-            url: "http://tauri.localhost".parse().unwrap(),
+            url: LOCAL_URL.parse().unwrap(),
             body: Default::default(),
             headers: Default::default(),
             invoke_key: INVOKE_KEY.to_string(),
