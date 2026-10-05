@@ -6,6 +6,8 @@ use std::collections::BTreeSet;
 pub type Millis = u64;
 
 pub const WAITS_FOR_GAME: &str = "A game is running. The import waits until you stop playing.";
+pub const UNCHANGED_BY_IMPORT: &str =
+    "The last import did not change Steam. Pick Sync now in the tray to try again.";
 
 pub fn plural(count: usize, noun: &str) -> String {
     if count == 1 {
@@ -111,6 +113,9 @@ pub enum Effect {
 pub struct Machine {
     state: State,
     countdown_ms: Millis,
+    /// The change set of the last import that succeeded, until a check finds no change
+    /// or a different one. Seeing it again means the import left Steam as it was.
+    last_synced: Option<ChangeSet>,
 }
 
 impl Machine {
@@ -118,6 +123,7 @@ impl Machine {
         Self {
             state: State::Idle,
             countdown_ms,
+            last_synced: None,
         }
     }
 
@@ -151,7 +157,7 @@ impl Machine {
         }
     }
 
-    fn transition(&self, state: State, event: Event) -> (State, Vec<Effect>) {
+    fn transition(&mut self, state: State, event: Event) -> (State, Vec<Effect>) {
         match (state, event) {
             (
                 state,
@@ -160,7 +166,8 @@ impl Machine {
                     ..
                 },
             ) => (state, Vec::new()),
-            (State::Syncing { .. }, Event::SyncFinished { error: None }) => {
+            (State::Syncing { change, .. }, Event::SyncFinished { error: None }) => {
+                self.last_synced = Some(change);
                 (State::Idle, Vec::new())
             }
             (State::Syncing { change, .. }, Event::SyncFinished { error: Some(error) }) => (
@@ -181,7 +188,31 @@ impl Machine {
                     game_running,
                     now,
                 },
-            ) => self.start(change, steam_running, game_running, now),
+            ) => {
+                if self.last_synced.as_ref() == Some(&change) {
+                    // Importing it again would restart Steam at every check.
+                    (
+                        State::Deferred {
+                            change,
+                            after_failure: true,
+                        },
+                        vec![Effect::Notify(UNCHANGED_BY_IMPORT.to_string())],
+                    )
+                } else {
+                    self.last_synced = None;
+                    self.start(change, steam_running, game_running, now)
+                }
+            }
+            (
+                State::Idle,
+                Event::Checked {
+                    result: CheckResult::NoChange,
+                    ..
+                },
+            ) => {
+                self.last_synced = None;
+                (State::Idle, Vec::new())
+            }
             (State::Idle, _) => (State::Idle, Vec::new()),
             (
                 _,
@@ -189,7 +220,10 @@ impl Machine {
                     result: CheckResult::NoChange,
                     ..
                 },
-            ) => (State::Idle, vec![Effect::HidePrompt]),
+            ) => {
+                self.last_synced = None;
+                (State::Idle, vec![Effect::HidePrompt])
+            }
             (
                 State::Deferred {
                     change: deferred,
@@ -312,13 +346,10 @@ impl Machine {
         now: Millis,
     ) -> (State, Vec<Effect>) {
         match state {
-            State::WaitingForGame { change } if !game_running => {
-                if steam_running {
-                    self.start_countdown(change, now)
-                } else {
-                    Self::sync(change, false)
-                }
-            }
+            // Steam closed: importing touches no game, whatever the game signals say (a
+            // stale Steam "running app" would otherwise keep this state forever).
+            State::WaitingForGame { change } if !steam_running => Self::sync(change, false),
+            State::WaitingForGame { change } if !game_running => self.start_countdown(change, now),
             State::Countdown { change, deadline } if now >= deadline => {
                 let (next, mut effects) = if !steam_running {
                     // The user closed Steam meanwhile: import, but don't start it again.
@@ -1076,6 +1107,93 @@ mod tests {
         });
         assert_eq!(machine.reset(), vec![Effect::HidePrompt]);
         assert_eq!(machine.state(), &State::Idle);
+    }
+
+    #[test]
+    fn waiting_with_steam_closed_imports_even_while_a_game_runs() {
+        let c = change(&[1], &[]);
+        let mut machine = machine_in(State::WaitingForGame { change: c.clone() });
+        let effects = machine.handle(probed(false, true, 5_000));
+        assert_eq!(
+            effects,
+            vec![Effect::StartSync {
+                restart_steam: false
+            }]
+        );
+        assert_eq!(
+            machine.state(),
+            &State::Syncing {
+                change: c,
+                restart_steam: false
+            }
+        );
+    }
+
+    /// Steam is restarted for an import; a sync that "worked" but left Steam unchanged
+    /// would otherwise restart it again at every check.
+    #[test]
+    fn the_same_change_after_a_successful_import_is_not_imported_again() {
+        let c = change(&[1], &[]);
+        let mut machine = machine_in(State::Syncing {
+            change: c.clone(),
+            restart_steam: true,
+        });
+        assert!(machine
+            .handle(Event::SyncFinished { error: None })
+            .is_empty());
+
+        let effects = machine.handle(changed(&c, true, false, 300_000));
+        assert_eq!(
+            effects,
+            vec![Effect::Notify(UNCHANGED_BY_IMPORT.to_string())]
+        );
+        assert_eq!(
+            machine.state(),
+            &State::Deferred {
+                change: c.clone(),
+                after_failure: true
+            }
+        );
+        // Not retried when Steam is found closed, nor notified again.
+        assert!(machine.handle(probed(false, false, 305_000)).is_empty());
+        assert!(machine.handle(changed(&c, true, false, 600_000)).is_empty());
+    }
+
+    #[test]
+    fn a_different_change_after_an_import_starts_normally() {
+        let first = change(&[1], &[]);
+        let second = change(&[1, 2], &[]);
+        let mut machine = machine_in(State::Syncing {
+            change: first,
+            restart_steam: true,
+        });
+        machine.handle(Event::SyncFinished { error: None });
+        assert_eq!(
+            machine.handle(changed(&second, true, false, 1_000)),
+            vec![Effect::ShowPrompt {
+                change: second,
+                deadline: 61_000
+            }]
+        );
+    }
+
+    #[test]
+    fn a_check_without_changes_forgets_the_last_import() {
+        let c = change(&[1], &[]);
+        let mut machine = machine_in(State::Syncing {
+            change: c.clone(),
+            restart_steam: true,
+        });
+        machine.handle(Event::SyncFinished { error: None });
+        assert!(machine.handle(no_change(1_000)).is_empty());
+        // The same games appearing again later is a new change.
+        assert_eq!(
+            machine.handle(changed(&c, true, false, 2_000)),
+            vec![Effect::ShowPrompt {
+                change: c,
+                deadline: 62_000
+            }]
+        );
     }
 
     #[test]

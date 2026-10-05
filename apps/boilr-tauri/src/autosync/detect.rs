@@ -203,6 +203,30 @@ mod tests {
         assert_eq!(run(&snapshots, &settings, &[1]), CheckResult::NoChange);
     }
 
+    /// A rename gives the game a new app id in Steam (name and exe make the id), so the
+    /// check must compare the renamed id, or every check would see a change.
+    #[test]
+    fn a_renamed_game_is_compared_under_its_new_app_id() {
+        let snapshots = [platform("Epic", true, Some(vec![game(1, "A")]), None)];
+        let renames = HashMap::from([(1, "Renamed".to_string())]);
+        let renamed_id = steam_shortcuts_util::calculate_app_id_for_shortcut(&Shortcut::new(
+            "0", "Renamed", "game.exe", "", "", "", "",
+        ));
+        assert_ne!(renamed_id, 1);
+
+        assert_eq!(
+            detect(&snapshots, &settings(), &renames, &ids(&[renamed_id])),
+            CheckResult::NoChange
+        );
+        assert_eq!(
+            detect(&snapshots, &settings(), &renames, &ids(&[1])),
+            CheckResult::Changed(ChangeSet {
+                added: ids(&[renamed_id]),
+                removed: ids(&[1])
+            })
+        );
+    }
+
     #[test]
     fn no_platform_data_is_no_change() {
         let snapshots = [platform("Epic", false, None, None)];
