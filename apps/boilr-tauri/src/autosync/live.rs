@@ -130,7 +130,7 @@ fn xbox_dirs(_snapshots: &[PlatformSnapshot]) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::RefCell;
+    use std::{cell::RefCell, panic, sync::Once};
 
     use boilr::platforms::ShortcutToImport;
     use steam_shortcuts_util::Shortcut;
@@ -152,6 +152,28 @@ mod tests {
             }),
             error: error.map(str::to_string),
         }
+    }
+
+    const IMPORT_PANIC: &str = "the importer crashed";
+
+    /// Keeps the expected panics of these tests out of the test output. Installed once and
+    /// never removed, so tests running in parallel can't race on the global hook; every
+    /// other panic still goes to the previous hook.
+    fn mute_import_panics() {
+        static MUTE: Once = Once::new();
+        MUTE.call_once(|| {
+            let previous = panic::take_hook();
+            panic::set_hook(Box::new(move |info| {
+                let message = info
+                    .payload()
+                    .downcast_ref::<&str>()
+                    .copied()
+                    .or_else(|| info.payload().downcast_ref::<String>().map(String::as_str));
+                if message != Some(IMPORT_PANIC) {
+                    previous(info);
+                }
+            }));
+        });
     }
 
     #[test]
@@ -182,12 +204,10 @@ mod tests {
 
     #[test]
     fn a_panicking_import_becomes_an_error() {
-        let result = guarded_import(
-            || vec![snapshot("GOG", None)],
-            |_| panic!("index out of bounds"),
-        );
+        mute_import_panics();
+        let result = guarded_import(|| vec![snapshot("GOG", None)], |_| panic!("{IMPORT_PANIC}"));
         let err = result.expect_err("a panic is an error");
-        assert!(err.contains("index out of bounds"), "{err}");
+        assert!(err.contains(IMPORT_PANIC), "{err}");
     }
 
     struct Steps {
@@ -207,13 +227,14 @@ mod tests {
             let error = self.blocked.then_some("unreachable");
             guarded_import(
                 || vec![snapshot("Epic", error)],
-                |_| panic!("the importer crashed"),
+                |_| panic!("{IMPORT_PANIC}"),
             )
         }
     }
 
     #[test]
     fn steam_is_started_again_after_a_blocked_or_panicking_import() {
+        mute_import_panics();
         for blocked in [true, false] {
             let steps = Steps {
                 log: RefCell::new(Vec::new()),

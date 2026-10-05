@@ -127,7 +127,7 @@ async fn run_full_sync(
         }
     });
 
-    tauri::async_runtime::spawn_blocking(move || perform_full_sync(Some(progress_tx), true))
+    tauri::async_runtime::spawn_blocking(move || perform_full_sync(Some(progress_tx)))
         .await
         .map_err(|err| err.to_string())?
 }
@@ -289,11 +289,10 @@ fn main() {
 
 fn perform_full_sync(
     progress: Option<tokio::sync::watch::Sender<SyncProgress>>,
-    manage_steam: bool,
 ) -> Result<SyncOutcome, String> {
     let settings = Settings::new().map_err(|err| err.to_string())?;
     let snapshots = gather_platform_snapshots();
-    sync_snapshots(settings, snapshots, progress, manage_steam)
+    sync_snapshots(settings, snapshots, progress, true)
 }
 
 /// The import itself, from snapshots the caller already gathered (autosync checks them for

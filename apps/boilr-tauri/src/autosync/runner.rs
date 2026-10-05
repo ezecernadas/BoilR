@@ -130,7 +130,8 @@ pub fn describe(state: &State, enabled: bool, paused: bool, blocked: &[String]) 
     if !enabled {
         return "Autosync is off".to_string();
     }
-    if paused {
+    // A Sync now while paused still runs its countdown; show that instead.
+    if paused && matches!(state, State::Idle) {
         return "Autosync paused".to_string();
     }
     if !blocked.is_empty() {
@@ -223,6 +224,7 @@ impl Runner {
         let output = match checked {
             Ok(output) => output,
             Err(err) => {
+                self.blocked.clear();
                 self.record_check(now, format!("Check failed: {err}"));
                 self.publish();
                 return;
@@ -244,9 +246,10 @@ impl Runner {
         .await;
     }
 
-    /// The cheap 5 s tick: only the OS readings. Skipped while paused.
+    /// The cheap 5 s tick: only the OS readings. It runs while paused too: a pause resets
+    /// to `Idle`, so only a Sync now can be pending then, and its countdown must finish.
     pub async fn probe(&mut self, now: Millis) {
-        if !self.enabled() || self.paused {
+        if !self.enabled() {
             return;
         }
         let (steam_running, game_running) = self.read_probes();
@@ -308,6 +311,7 @@ impl Runner {
             Ok(settings) => settings,
             Err(err) => {
                 eprintln!("Autosync skipped a check, the settings could not be read: {err}");
+                self.blocked.clear();
                 self.record_check(now, format!("Settings unreadable: {err}"));
                 return false;
             }
@@ -664,6 +668,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sync_now_while_paused_finishes_its_countdown() {
+        let work = work(Ok(settings(true)), vec![one_new_game()], ok());
+        let mut h = harness(work.clone(), true, false);
+        h.runner.input(RunnerInput::TogglePause, 0).await;
+        h.runner.input(RunnerInput::SyncNow, 1_000).await;
+        assert!(lock_status(&h.status).prompt.is_some());
+        assert_eq!(lock_status(&h.status).summary, "1 game pending");
+
+        h.runner.probe(10 * 60 * 1_000).await;
+        assert_eq!(*work.syncs.lock().expect("lock"), vec![true]);
+        assert!(h.runner.is_idle());
+        assert_eq!(lock_status(&h.status).summary, "Autosync paused");
+    }
+
+    #[tokio::test]
+    async fn a_failed_check_forgets_the_blocked_platforms() {
+        struct Flaky {
+            inner: Arc<FakeWork>,
+            fail: AtomicBool,
+        }
+        impl Work for Flaky {
+            fn load_settings(&self) -> Result<Settings, String> {
+                self.inner.load_settings()
+            }
+            fn check(&self, settings: &Settings) -> Result<CheckOutput, String> {
+                if self.fail.load(Ordering::SeqCst) {
+                    Err("shortcuts.vdf unreadable".to_string())
+                } else {
+                    self.inner.check(settings)
+                }
+            }
+            fn sync(&self, settings: &Settings, restart_steam: bool) -> ExecOutcome {
+                self.inner.sync(settings, restart_steam)
+            }
+        }
+        let blocked = CheckResult::Blocked {
+            platforms: vec!["Epic".to_string()],
+        };
+        let flaky = Arc::new(Flaky {
+            inner: work(Ok(settings(true)), vec![blocked], ok()),
+            fail: AtomicBool::new(false),
+        });
+        let probes = Arc::new(FakeProbes {
+            steam: AtomicBool::new(false),
+            game: AtomicBool::new(false),
+        });
+        let status: SharedStatus = Arc::new(Mutex::new(AutosyncStatus::default()));
+        let mut runner = Runner::new(
+            flaky.clone(),
+            probes,
+            Arc::new(FakeUi::default()),
+            status.clone(),
+        );
+        runner.check(1_000, false).await;
+        assert_eq!(lock_status(&status).summary, "Blocked: Epic");
+
+        flaky.fail.store(true, Ordering::SeqCst);
+        runner.check(2_000, false).await;
+        assert_eq!(lock_status(&status).summary, "Up to date");
+        assert_eq!(
+            lock_status(&status).last_check.as_deref(),
+            Some("Check failed: shortcuts.vdf unreadable")
+        );
+    }
+
+    #[tokio::test]
     async fn a_blocked_check_does_not_sync_and_names_the_platform() {
         let blocked = CheckResult::Blocked {
             platforms: vec!["Epic".to_string()],
@@ -763,6 +833,7 @@ mod tests {
         );
         assert_eq!(describe(&State::Idle, true, false, &[]), "Up to date");
         assert_eq!(describe(&pending, true, false, &[]), "2 games pending");
+        assert_eq!(describe(&pending, true, true, &[]), "2 games pending");
     }
 
     #[test]
