@@ -20,3 +20,15 @@ pub fn autosync_restart_now(handle: State<'_, AutosyncHandle>) -> Result<(), Str
 pub fn autosync_not_now(handle: State<'_, AutosyncHandle>) -> Result<(), String> {
     handle.send(RunnerInput::NotNow)
 }
+
+/// Lets the prompt close itself when it has nothing to show. A command rather than the
+/// window API, which would need a capability; only the prompt window may be closed.
+#[tauri::command]
+pub fn autosync_close_prompt<R: tauri::Runtime>(
+    window: tauri::WebviewWindow<R>,
+) -> Result<(), String> {
+    if window.label() != super::PROMPT_LABEL {
+        return Err("Only the autosync prompt can be closed this way".to_string());
+    }
+    window.destroy().map_err(|err| err.to_string())
+}

@@ -302,7 +302,8 @@ fn main() {
             ping,
             autosync::commands::autosync_prompt_info,
             autosync::commands::autosync_restart_now,
-            autosync::commands::autosync_not_now
+            autosync::commands::autosync_not_now,
+            autosync::commands::autosync_close_prompt
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -1010,7 +1011,8 @@ mod tests {
                 ping,
                 autosync::commands::autosync_prompt_info,
                 autosync::commands::autosync_restart_now,
-                autosync::commands::autosync_not_now
+                autosync::commands::autosync_not_now,
+                autosync::commands::autosync_close_prompt
             ])
             .build(mock_context(noop_assets()))
             .expect("failed to build tauri app for tests");
@@ -1062,10 +1064,28 @@ mod tests {
     }
 
     #[test]
+    fn autosync_close_prompt_refuses_other_windows() {
+        let webview = build_mock_webview();
+        let err = get_ipc_response(&webview, invoke_request("autosync_close_prompt"))
+            .expect_err("the main window must not be closable this way");
+        assert_eq!(
+            err,
+            serde_json::json!("Only the autosync prompt can be closed this way")
+        );
+    }
+
+    #[test]
     fn autosync_answers_fail_without_a_runner() {
         let webview = build_mock_webview();
-        assert!(get_ipc_response(&webview, invoke_request("autosync_restart_now")).is_err());
-        assert!(get_ipc_response(&webview, invoke_request("autosync_not_now")).is_err());
+        for cmd in ["autosync_restart_now", "autosync_not_now"] {
+            let err = get_ipc_response(&webview, invoke_request(cmd))
+                .expect_err("the answer should fail without a runner");
+            assert_eq!(
+                err,
+                serde_json::json!("Autosync is only available on Windows"),
+                "{cmd}"
+            );
+        }
     }
 
     #[test]

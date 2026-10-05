@@ -293,6 +293,7 @@ mockIPC(
         return promptInfo;
       case "autosync_restart_now":
       case "autosync_not_now":
+      case "autosync_close_prompt":
         console.info("[devMock]", cmd);
         return null;
       default:
