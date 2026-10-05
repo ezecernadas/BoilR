@@ -1,5 +1,7 @@
 //! The real `Work`: launchers, Steam's shortcut files and the import pipeline.
 
+use std::sync::Mutex;
+
 use boilr::renames::load_rename_map;
 use boilr_core::{
     settings::Settings,
@@ -12,7 +14,9 @@ use super::{
     probes::{game_dirs, game_start_dir},
     runner::{CheckOutput, Work},
 };
-use crate::{gather_platform_snapshots, sync_snapshots, PlatformSnapshot};
+use crate::{
+    gather_platform_snapshots, sync_snapshots, try_import_lock, PlatformSnapshot, IMPORT_LOCK,
+};
 
 pub struct LiveWork;
 
@@ -56,7 +60,7 @@ impl Work for LiveWork {
         let steps = LiveSteps {
             settings: settings.clone(),
         };
-        run_autosync(&steps, restart_steam)
+        locked(&IMPORT_LOCK, || run_autosync(&steps, restart_steam))
     }
 }
 
@@ -87,6 +91,21 @@ impl SyncSteps for LiveSteps {
         sync_snapshots(self.settings.clone(), snapshots, None, false).map(|_| ())
     }
 }
+
+/// Runs `sync` holding the import lock for all of it (launchers, stop, import, start), so
+/// a manual import can't rewrite `shortcuts.vdf` meanwhile. A manual import already running
+/// fails this sync without touching Steam.
+fn locked(lock: &Mutex<()>, sync: impl FnOnce() -> ExecOutcome) -> ExecOutcome {
+    match try_import_lock(lock, MANUAL_IMPORTING) {
+        Ok(_import) => sync(),
+        Err(err) => ExecOutcome {
+            import: Err(err),
+            steam_start_error: None,
+        },
+    }
+}
+
+const MANUAL_IMPORTING: &str = "another import is running";
 
 /// Reads the launchers again right before importing and refuses when one failed since the
 /// check: the import would delete that launcher's games from Steam.
@@ -152,6 +171,42 @@ mod tests {
         let result =
             checked_snapshots(|| vec![snapshot("GOG", None), snapshot("Epic", Some("timeout"))]);
         assert_eq!(result.map(|s| s.len()), Err("Blocked: Epic".to_string()));
+    }
+
+    #[test]
+    fn an_import_running_elsewhere_fails_the_sync_without_running_it() {
+        let lock = Mutex::new(());
+        let _manual = lock.lock().expect("fresh lock");
+        let mut ran = false;
+        let outcome = locked(&lock, || {
+            ran = true;
+            ExecOutcome {
+                import: Ok(()),
+                steam_start_error: None,
+            }
+        });
+        assert!(!ran);
+        assert_eq!(
+            outcome,
+            ExecOutcome {
+                import: Err(MANUAL_IMPORTING.to_string()),
+                steam_start_error: None
+            }
+        );
+    }
+
+    #[test]
+    fn the_sync_holds_the_lock_while_it_runs() {
+        let lock = Mutex::new(());
+        let outcome = locked(&lock, || {
+            assert!(lock.try_lock().is_err(), "held during the sync");
+            ExecOutcome {
+                import: Ok(()),
+                steam_start_error: None,
+            }
+        });
+        assert_eq!(outcome.import, Ok(()));
+        assert!(lock.try_lock().is_ok(), "released after the sync");
     }
 
     #[test]

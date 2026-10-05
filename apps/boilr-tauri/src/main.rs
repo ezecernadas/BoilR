@@ -6,7 +6,7 @@ mod library;
 
 use std::{
     collections::{HashMap, HashSet},
-    sync::Arc,
+    sync::{Arc, Mutex, MutexGuard, TryLockError},
 };
 
 use boilr::{
@@ -339,9 +339,26 @@ fn main() {
         .expect("error while running tauri application");
 }
 
+/// One import at a time. A manual import and an autosync import both rewrite every user's
+/// `shortcuts.vdf`, and autosync stops Steam: held for the whole of either.
+static IMPORT_LOCK: Mutex<()> = Mutex::new(());
+
+const AUTOSYNC_IMPORTING: &str = "Autosync is importing. Try again when it ends.";
+
+/// Takes the import lock, or says `busy` when another import holds it. The lock guards no
+/// data, so one left poisoned by a panicking import is simply taken.
+fn try_import_lock<'a>(lock: &'a Mutex<()>, busy: &str) -> Result<MutexGuard<'a, ()>, String> {
+    match lock.try_lock() {
+        Ok(guard) => Ok(guard),
+        Err(TryLockError::Poisoned(poisoned)) => Ok(poisoned.into_inner()),
+        Err(TryLockError::WouldBlock) => Err(busy.to_string()),
+    }
+}
+
 fn perform_full_sync(
     progress: Option<tokio::sync::watch::Sender<SyncProgress>>,
 ) -> Result<SyncOutcome, String> {
+    let _import = try_import_lock(&IMPORT_LOCK, AUTOSYNC_IMPORTING)?;
     let settings = Settings::new().map_err(|err| err.to_string())?;
     let snapshots = gather_platform_snapshots();
     sync_snapshots(settings, snapshots, progress, true)
@@ -1079,6 +1096,31 @@ mod tests {
             headers: Default::default(),
             invoke_key: INVOKE_KEY.to_string(),
         }
+    }
+
+    #[test]
+    fn a_held_import_lock_refuses_a_second_import() {
+        let lock = Mutex::new(());
+        let first = try_import_lock(&lock, "busy").expect("a free lock is taken");
+        assert_eq!(
+            try_import_lock(&lock, "busy").map(|_| ()),
+            Err("busy".to_string())
+        );
+        drop(first);
+        assert!(try_import_lock(&lock, "busy").is_ok());
+    }
+
+    #[test]
+    fn a_poisoned_import_lock_is_still_taken() {
+        let lock = Arc::new(Mutex::new(()));
+        let poisoner = Arc::clone(&lock);
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoner.lock();
+            std::panic::resume_unwind(Box::new("poison the import lock"));
+        })
+        .join();
+        assert!(lock.is_poisoned());
+        assert!(try_import_lock(&lock, "busy").is_ok());
     }
 
     #[test]
