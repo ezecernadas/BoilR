@@ -299,7 +299,10 @@ fn main() {
             artwork::set_artwork_game,
             artwork::find_missing_artwork,
             rename_game,
-            ping
+            ping,
+            autosync::commands::autosync_prompt_info,
+            autosync::commands::autosync_restart_now,
+            autosync::commands::autosync_not_now
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -979,6 +982,8 @@ mod tests {
                 app.manage(ProgressEmitter(Arc::new(|_, _| {})));
                 Ok(())
             })
+            // Builder-level: the mock runtime does not run `setup` before commands are invoked.
+            .manage(autosync::AutosyncHandle::unavailable())
             .invoke_handler(tauri::generate_handler![
                 load_settings,
                 discover_games,
@@ -1002,7 +1007,10 @@ mod tests {
                 artwork::set_artwork_game,
                 artwork::find_missing_artwork,
                 rename_game,
-                ping
+                ping,
+                autosync::commands::autosync_prompt_info,
+                autosync::commands::autosync_restart_now,
+                autosync::commands::autosync_not_now
             ])
             .build(mock_context(noop_assets()))
             .expect("failed to build tauri app for tests");
@@ -1040,6 +1048,24 @@ mod tests {
             .deserialize::<String>()
             .expect("invalid ping payload");
         assert_eq!(value, "pong");
+    }
+
+    #[test]
+    fn autosync_prompt_info_is_empty_without_a_runner() {
+        let webview = build_mock_webview();
+        let response = get_ipc_response(&webview, invoke_request("autosync_prompt_info"))
+            .expect("autosync_prompt_info should succeed");
+        let info = response
+            .deserialize::<Option<autosync::runner::PromptInfo>>()
+            .expect("prompt info payload");
+        assert_eq!(info, None);
+    }
+
+    #[test]
+    fn autosync_answers_fail_without_a_runner() {
+        let webview = build_mock_webview();
+        assert!(get_ipc_response(&webview, invoke_request("autosync_restart_now")).is_err());
+        assert!(get_ipc_response(&webview, invoke_request("autosync_not_now")).is_err());
     }
 
     #[test]

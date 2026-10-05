@@ -38,6 +38,8 @@ let platforms: PlatformSummary[] = [
 ];
 
 const importedIds = new Set<number>();
+// The prompt view (?view=autosync-prompt) counts down from page load.
+const promptInfo = { summary: "2 new games", deadline_ms: Date.now() + 60_000 };
 const plan = (): SyncPlan => ({
   additions: platforms
     .filter((p) => p.enabled)
@@ -287,6 +289,12 @@ mockIPC(
         managed = managed.filter((m) => m.app_id !== a.appId);
         settings = { ...settings, blacklisted_games: [...(settings.blacklisted_games ?? []), a.appId] };
         return settings;
+      case "autosync_prompt_info":
+        return promptInfo;
+      case "autosync_restart_now":
+      case "autosync_not_now":
+        console.info("[devMock]", cmd);
+        return null;
       default:
         console.warn("[devMock] unhandled command", cmd, args);
         return null;

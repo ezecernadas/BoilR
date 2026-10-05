@@ -163,3 +163,9 @@ export type GameMatch = {
   current_id: number | null;
   candidates: GameCandidate[];
 };
+
+export type PromptInfo = {
+  summary: string;
+  /** Milliseconds since the Unix epoch. */
+  deadline_ms: number;
+};

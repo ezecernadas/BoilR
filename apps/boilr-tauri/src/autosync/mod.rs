@@ -3,6 +3,7 @@
 //! elsewhere the code is compiled and unit-tested but never run, hence the allow.
 #![cfg_attr(not(windows), allow(dead_code))]
 
+pub mod commands;
 pub mod detect;
 pub mod executor;
 pub mod live;
