@@ -299,7 +299,9 @@ fn main() {
                 .unwrap_or(false);
             if !autosync::start_hidden(&args, available, autosync_enabled) {
                 if let Some(window) = app.get_webview_window(autosync::MAIN_LABEL) {
-                    window.show()?;
+                    if let Err(err) = window.show() {
+                        eprintln!("Could not show the BoilR window: {err}");
+                    }
                 }
             }
             Ok(())
