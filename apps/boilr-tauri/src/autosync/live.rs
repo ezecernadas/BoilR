@@ -1,11 +1,9 @@
 //! The real `Work`: launchers, Steam's shortcut files and the import pipeline.
 
-use std::panic::{catch_unwind, AssertUnwindSafe};
-
 use boilr::renames::load_rename_map;
 use boilr_core::{
     settings::Settings,
-    steam::{ensure_steam_stopped, get_steam_common_folders, try_start_steam},
+    steam::{ensure_steam_stopped, get_steam_common_folders, is_steam_running, try_start_steam},
 };
 
 use super::{
@@ -67,6 +65,16 @@ struct LiveSteps {
 }
 
 impl SyncSteps for LiveSteps {
+    type Prepared = Vec<PlatformSnapshot>;
+
+    fn prepare(&self) -> Result<Vec<PlatformSnapshot>, String> {
+        checked_snapshots(gather_platform_snapshots)
+    }
+
+    fn steam_running(&self) -> bool {
+        is_steam_running()
+    }
+
     fn stop_steam(&self) {
         ensure_steam_stopped(&self.settings.steam);
     }
@@ -75,36 +83,23 @@ impl SyncSteps for LiveSteps {
         try_start_steam(&self.settings.steam).map_err(|err| err.to_string())
     }
 
-    fn import(&self) -> Result<(), String> {
-        guarded_import(gather_platform_snapshots, |snapshots| {
-            sync_snapshots(self.settings.clone(), snapshots, None, false).map(|_| ())
-        })
+    fn import(&self, snapshots: Vec<PlatformSnapshot>) -> Result<(), String> {
+        sync_snapshots(self.settings.clone(), snapshots, None, false).map(|_| ())
     }
 }
 
 /// Reads the launchers again right before importing and refuses when one failed since the
-/// check: the import would delete that launcher's games from Steam. A panic becomes an
-/// error, so the executor still starts Steam again.
-fn guarded_import(
+/// check: the import would delete that launcher's games from Steam.
+fn checked_snapshots(
     gather: impl FnOnce() -> Vec<PlatformSnapshot>,
-    import: impl FnOnce(Vec<PlatformSnapshot>) -> Result<(), String>,
-) -> Result<(), String> {
-    let run = || {
-        let snapshots = gather();
-        let blocked = blocked_platforms(&snapshots);
-        if !blocked.is_empty() {
-            return Err(format!("Blocked: {}", blocked.join(", ")));
-        }
-        import(snapshots)
-    };
-    catch_unwind(AssertUnwindSafe(run)).unwrap_or_else(|payload| {
-        let reason = payload
-            .downcast_ref::<&str>()
-            .map(|text| text.to_string())
-            .or_else(|| payload.downcast_ref::<String>().cloned())
-            .unwrap_or_else(|| "unknown error".to_string());
-        Err(format!("The import stopped unexpectedly: {reason}"))
-    })
+) -> Result<Vec<PlatformSnapshot>, String> {
+    let snapshots = gather();
+    let blocked = blocked_platforms(&snapshots);
+    if blocked.is_empty() {
+        Ok(snapshots)
+    } else {
+        Err(format!("Blocked: {}", blocked.join(", ")))
+    }
 }
 
 /// Xbox shortcuts start `explorer.exe` from the Windows folder, so their games are found
@@ -130,8 +125,6 @@ fn xbox_dirs(_snapshots: &[PlatformSnapshot]) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::{cell::RefCell, panic, sync::Once};
-
     use boilr::platforms::ShortcutToImport;
     use steam_shortcuts_util::Shortcut;
 
@@ -154,95 +147,16 @@ mod tests {
         }
     }
 
-    const IMPORT_PANIC: &str = "the importer crashed";
-
-    /// Keeps the expected panics of these tests out of the test output. Installed once and
-    /// never removed, so tests running in parallel can't race on the global hook; every
-    /// other panic still goes to the previous hook.
-    fn mute_import_panics() {
-        static MUTE: Once = Once::new();
-        MUTE.call_once(|| {
-            let previous = panic::take_hook();
-            panic::set_hook(Box::new(move |info| {
-                let message = info
-                    .payload()
-                    .downcast_ref::<&str>()
-                    .copied()
-                    .or_else(|| info.payload().downcast_ref::<String>().map(String::as_str));
-                if message != Some(IMPORT_PANIC) {
-                    previous(info);
-                }
-            }));
-        });
-    }
-
     #[test]
     fn a_platform_that_fails_at_import_time_refuses_the_import() {
-        let imported = RefCell::new(false);
-        let result = guarded_import(
-            || vec![snapshot("GOG", None), snapshot("Epic", Some("timeout"))],
-            |_| {
-                *imported.borrow_mut() = true;
-                Ok(())
-            },
-        );
-        assert_eq!(result, Err("Blocked: Epic".to_string()));
-        assert!(!*imported.borrow());
+        let result =
+            checked_snapshots(|| vec![snapshot("GOG", None), snapshot("Epic", Some("timeout"))]);
+        assert_eq!(result.map(|s| s.len()), Err("Blocked: Epic".to_string()));
     }
 
     #[test]
     fn the_import_gets_the_snapshots_that_were_checked() {
-        let result = guarded_import(
-            || vec![snapshot("GOG", None)],
-            |snapshots| {
-                assert_eq!(snapshots.len(), 1);
-                Ok(())
-            },
-        );
-        assert_eq!(result, Ok(()));
-    }
-
-    #[test]
-    fn a_panicking_import_becomes_an_error() {
-        mute_import_panics();
-        let result = guarded_import(|| vec![snapshot("GOG", None)], |_| panic!("{IMPORT_PANIC}"));
-        let err = result.expect_err("a panic is an error");
-        assert!(err.contains(IMPORT_PANIC), "{err}");
-    }
-
-    struct Steps {
-        log: RefCell<Vec<&'static str>>,
-        blocked: bool,
-    }
-
-    impl SyncSteps for Steps {
-        fn stop_steam(&self) {
-            self.log.borrow_mut().push("stop");
-        }
-        fn start_steam(&self) -> Result<(), String> {
-            self.log.borrow_mut().push("start");
-            Ok(())
-        }
-        fn import(&self) -> Result<(), String> {
-            let error = self.blocked.then_some("unreachable");
-            guarded_import(
-                || vec![snapshot("Epic", error)],
-                |_| panic!("{IMPORT_PANIC}"),
-            )
-        }
-    }
-
-    #[test]
-    fn steam_is_started_again_after_a_blocked_or_panicking_import() {
-        mute_import_panics();
-        for blocked in [true, false] {
-            let steps = Steps {
-                log: RefCell::new(Vec::new()),
-                blocked,
-            };
-            let outcome = run_autosync(&steps, true);
-            assert!(outcome.import.is_err());
-            assert_eq!(*steps.log.borrow(), vec!["stop", "start"]);
-        }
+        let result = checked_snapshots(|| vec![snapshot("GOG", None)]);
+        assert_eq!(result.map(|s| s.len()), Ok(1));
     }
 }
