@@ -3,6 +3,7 @@
 
 use tauri::State;
 
+use super::probes::read_probes;
 use super::runner::{lock_status, AutosyncHandle, AutosyncStatus, PromptInfo, RunnerInput};
 
 /// Text and deadline for the countdown window; `None` when no prompt is open.
@@ -39,11 +40,10 @@ pub fn autosync_close_prompt<R: tauri::Runtime>(
 pub async fn autosync_status(handle: State<'_, AutosyncHandle>) -> Result<AutosyncStatus, String> {
     let mut status = lock_status(&handle.status).clone();
     if let Some(probes) = handle.probes.clone() {
-        let (steam_running, signals) = tauri::async_runtime::spawn_blocking(move || {
-            (probes.steam_running(), probes.game_signals())
-        })
-        .await
-        .map_err(|err| err.to_string())?;
+        let (steam_running, signals) =
+            tauri::async_runtime::spawn_blocking(move || read_probes(probes.as_ref()))
+                .await
+                .map_err(|err| err.to_string())?;
         status.steam_running = Some(steam_running);
         status.game_signals = signals;
     }

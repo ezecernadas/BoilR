@@ -21,12 +21,32 @@ pub enum GameSignal {
     FullScreen,
 }
 
+/// A signal that fired, with what fired it when known (the program's path, Steam's app
+/// id), for the diagnostics readout.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignalReading {
+    pub signal: GameSignal,
+    pub detail: Option<String>,
+}
+
 pub trait Probes: Send + Sync {
     fn steam_running(&self) -> bool;
     /// Every signal that says a game is running; empty when none does.
-    fn game_signals(&self) -> Vec<GameSignal>;
+    fn game_signals(&self) -> Vec<SignalReading>;
     /// Folders whose programs count as games, refreshed by every full check.
     fn set_game_dirs(&self, dirs: Vec<PathBuf>);
+}
+
+/// Whether Steam runs, and the game signals that count. Steam's "running app" is ignored
+/// while Steam is closed: the registry value can stay set after Steam exits.
+pub fn read_probes(probes: &dyn Probes) -> (bool, Vec<SignalReading>) {
+    let steam_running = probes.steam_running();
+    let signals = probes
+        .game_signals()
+        .into_iter()
+        .filter(|reading| steam_running || reading.signal != GameSignal::SteamRunningApp)
+        .collect();
+    (steam_running, signals)
 }
 
 #[cfg(windows)]

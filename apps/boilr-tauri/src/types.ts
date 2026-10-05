@@ -178,6 +178,12 @@ export type PromptInfo = {
 
 export type GameSignal = "game_folder_process" | "steam_running_app" | "full_screen";
 
+/** A signal that fired; `detail` says what fired it (a program's path, Steam's app id). */
+export type SignalReading = {
+  signal: GameSignal;
+  detail: string | null;
+};
+
 export type AutosyncStatus = {
   available: boolean;
   enabled: boolean;
@@ -185,7 +191,9 @@ export type AutosyncStatus = {
   summary: string;
   prompt: PromptInfo | null;
   steam_running: boolean | null;
-  game_signals: GameSignal[];
+  game_signals: SignalReading[];
+  /** An import runs right now. */
+  syncing: boolean;
   last_check_ms: number | null;
   last_check: string | null;
 };

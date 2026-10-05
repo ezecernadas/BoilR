@@ -277,7 +277,7 @@ fn update_platform_settings(
 }
 
 fn main() {
-    autosync::with_plugins(tauri::Builder::default())
+    let app = autosync::with_plugins(tauri::Builder::default())
         .setup(|app| {
             let handle = app.handle().clone();
             app.manage(ProgressEmitter(Arc::new(move |event, payload| {
@@ -335,8 +335,14 @@ fn main() {
             autosync::commands::autosync_close_prompt,
             autosync::commands::autosync_status
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!());
+    match app {
+        Ok(app) => app.run(autosync::on_run_event),
+        Err(err) => {
+            eprintln!("error while running tauri application: {err}");
+            std::process::exit(1);
+        }
+    }
 }
 
 /// One import at a time. A manual import and an autosync import both rewrite every user's

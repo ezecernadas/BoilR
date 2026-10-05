@@ -306,7 +306,11 @@ mockIPC(
           summary: settings.autosync?.enabled ? "2 games pending" : "Autosync is off",
           prompt: null,
           steam_running: true,
-          game_signals: ["full_screen"],
+          game_signals: [
+            { signal: "game_folder_process", detail: "C:\\Games\\Celeste\\Celeste.exe" },
+            { signal: "full_screen", detail: null },
+          ],
+          syncing: false,
           last_check_ms: Date.now() - 90_000,
           last_check: "2 new games",
         };

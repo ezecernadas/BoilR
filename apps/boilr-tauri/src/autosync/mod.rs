@@ -34,6 +34,18 @@ pub fn start_hidden(args: &[String], available: bool, enabled: bool) -> bool {
     available && enabled && args.iter().any(|arg| arg == BACKGROUND_ARG)
 }
 
+/// Signed in just now (`--background`): Steam and the launchers are still starting, so
+/// the first check waits; launched by hand it runs at once.
+pub fn first_check_delay(args: &[String]) -> std::time::Duration {
+    if args.iter().any(|arg| arg == BACKGROUND_ARG) {
+        SIGN_IN_DELAY
+    } else {
+        std::time::Duration::ZERO
+    }
+}
+
+const SIGN_IN_DELAY: std::time::Duration = std::time::Duration::from_secs(120);
+
 /// Top-left corner of the prompt, in logical pixels, for a monitor at (x, y) of the
 /// given logical size.
 pub fn prompt_corner(x: f64, y: f64, width: f64, height: f64) -> (f64, f64) {
@@ -71,6 +83,35 @@ pub fn on_window_event(window: &tauri::Window, event: &tauri::WindowEvent) {
             }
         }
     }
+}
+
+const QUIT_WAITS: &str = "BoilR quits when the import ends.";
+
+/// Every way out (tray Quit, closing the last window) waits for a running import, which
+/// may have stopped Steam: quitting then would leave Steam closed and `shortcuts.vdf`
+/// half written. The runner exits when the import ends.
+pub fn on_run_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
+    use tauri::Manager;
+    if let tauri::RunEvent::ExitRequested { api, .. } = event {
+        let waits = app
+            .try_state::<AutosyncHandle>()
+            .is_some_and(|handle| !handle.request_exit());
+        if waits {
+            api.prevent_exit();
+            notify(app, QUIT_WAITS);
+        }
+    }
+}
+
+#[cfg(windows)]
+fn notify(app: &tauri::AppHandle, text: &str) {
+    windows_app::notify(app, text);
+}
+
+/// Never reached: without autosync no import runs in the background.
+#[cfg(not(windows))]
+fn notify(_app: &tauri::AppHandle, text: &str) {
+    eprintln!("{text}");
 }
 
 #[cfg(windows)]
@@ -116,6 +157,18 @@ mod tests {
             "no autosync on this OS"
         );
         assert!(!start_hidden(&args(&["boilr.exe"]), true, true));
+    }
+
+    #[test]
+    fn the_first_check_waits_two_minutes_after_sign_in() {
+        assert_eq!(
+            first_check_delay(&args(&["boilr.exe", "--background"])),
+            std::time::Duration::from_secs(120)
+        );
+        assert_eq!(
+            first_check_delay(&args(&["boilr.exe"])),
+            std::time::Duration::ZERO
+        );
     }
 
     #[test]

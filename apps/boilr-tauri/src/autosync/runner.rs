@@ -16,7 +16,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use super::{
     executor::ExecOutcome,
     machine::{plural, CheckResult, Effect, Event, Machine, Millis, State},
-    probes::{GameSignal, Probes},
+    probes::{read_probes, Probes, SignalReading},
 };
 
 pub const PROBE_TICK: Duration = Duration::from_secs(5);
@@ -45,7 +45,12 @@ pub struct AutosyncStatus {
     pub summary: String,
     pub prompt: Option<PromptInfo>,
     pub steam_running: Option<bool>,
-    pub game_signals: Vec<GameSignal>,
+    pub game_signals: Vec<SignalReading>,
+    /// An import runs (Steam may be stopped): quitting now would leave Steam closed.
+    pub syncing: bool,
+    /// The user quit during an import: the app exits when it ends.
+    #[serde(skip)]
+    pub quit_after_sync: bool,
     pub last_check_ms: Option<Millis>,
     pub last_check: Option<String>,
 }
@@ -79,6 +84,8 @@ pub trait AutosyncUi: Send + Sync {
     fn set_tooltip(&self, text: &str);
     fn set_paused(&self, paused: bool);
     fn set_autostart(&self, enabled: bool);
+    /// Quits the app (after an import the user quit during).
+    fn exit(&self);
 }
 
 /// Lets commands and the tray reach the runner; managed as Tauri state on every platform.
@@ -107,6 +114,16 @@ impl AutosyncHandle {
         }
     }
 
+    /// Whether the app may exit now. During an import it may not: the exit is remembered
+    /// and the runner exits when the import ends.
+    pub fn request_exit(&self) -> bool {
+        let mut status = lock_status(&self.status);
+        if status.syncing {
+            status.quit_after_sync = true;
+        }
+        !status.syncing
+    }
+
     /// Closing the main window hides it instead of quitting while this is true.
     pub fn keeps_running(&self) -> bool {
         let status = lock_status(&self.status);
@@ -126,7 +143,13 @@ fn millis(duration: Duration) -> Millis {
 }
 
 /// The tray tooltip and the settings page status line.
-pub fn describe(state: &State, enabled: bool, paused: bool, blocked: &[String]) -> String {
+pub fn describe(
+    state: &State,
+    enabled: bool,
+    paused: bool,
+    blocked: &[String],
+    checked: bool,
+) -> String {
     if !enabled {
         return "Autosync is off".to_string();
     }
@@ -138,6 +161,7 @@ pub fn describe(state: &State, enabled: bool, paused: bool, blocked: &[String]) 
         return format!("Blocked: {}", blocked.join(", "));
     }
     match state {
+        State::Idle if !checked => "Not checked yet".to_string(),
         State::Idle => "Up to date".to_string(),
         State::Syncing {
             restart_steam: true,
@@ -165,6 +189,8 @@ pub struct Runner {
     settings: Option<Settings>,
     paused: bool,
     blocked: Vec<String>,
+    /// A check ran since autosync was last switched on.
+    checked: bool,
     work: Arc<dyn Work>,
     probes: Arc<dyn Probes>,
     ui: Arc<dyn AutosyncUi>,
@@ -183,6 +209,7 @@ impl Runner {
             settings: None,
             paused: false,
             blocked: Vec::new(),
+            checked: false,
             work,
             probes,
             ui,
@@ -221,6 +248,7 @@ impl Runner {
             .await
             .map_err(|err| err.to_string())
             .and_then(|result| result);
+        self.checked = true;
         let output = match checked {
             Ok(output) => output,
             Err(err) => {
@@ -236,7 +264,7 @@ impl Runner {
             _ => Vec::new(),
         };
         self.record_check(now, describe_result(&output.result));
-        let (steam_running, game_running) = self.read_probes();
+        let (steam_running, game_running) = self.read_probes().await;
         self.handle(Event::Checked {
             result: output.result,
             steam_running,
@@ -252,7 +280,7 @@ impl Runner {
         if !self.enabled() {
             return;
         }
-        let (steam_running, game_running) = self.read_probes();
+        let (steam_running, game_running) = self.read_probes().await;
         self.handle(Event::Probed {
             steam_running,
             game_running,
@@ -264,7 +292,7 @@ impl Runner {
     pub async fn input(&mut self, input: RunnerInput, now: Millis) {
         match input {
             RunnerInput::RestartNow => {
-                let (steam_running, game_running) = self.read_probes();
+                let (steam_running, game_running) = self.read_probes().await;
                 self.handle(Event::RestartNow {
                     steam_running,
                     game_running,
@@ -276,7 +304,7 @@ impl Runner {
                 if self.is_idle() {
                     self.check(now, true).await;
                 } else {
-                    let (steam_running, game_running) = self.read_probes();
+                    let (steam_running, game_running) = self.read_probes().await;
                     self.handle(Event::SyncNow {
                         steam_running,
                         game_running,
@@ -294,7 +322,11 @@ impl Runner {
                 self.publish();
             }
             RunnerInput::SettingsChanged => {
-                self.reload_settings(now).await;
+                let was_enabled = self.enabled();
+                if self.reload_settings(now).await && !was_enabled && self.enabled() {
+                    // Just switched on: check now rather than after a whole interval.
+                    self.check(now, false).await;
+                }
                 self.publish();
             }
         }
@@ -329,6 +361,7 @@ impl Runner {
         let enabled = settings.autosync.enabled;
         self.settings = Some(settings);
         if !enabled {
+            self.checked = false;
             self.reset().await;
         }
         true
@@ -341,9 +374,18 @@ impl Runner {
         }
     }
 
-    fn read_probes(&self) -> (bool, bool) {
-        let steam_running = self.probes.steam_running();
-        let signals = self.probes.game_signals();
+    /// Steam and game readings, taken on a blocking thread: they list every process.
+    async fn read_probes(&self) -> (bool, bool) {
+        let probes = Arc::clone(&self.probes);
+        let read = tokio::task::spawn_blocking(move || read_probes(probes.as_ref())).await;
+        let (steam_running, signals) = match read {
+            Ok(readings) => readings,
+            Err(err) => {
+                // Unknown: answer "Steam open, game running", which never restarts Steam.
+                eprintln!("Autosync could not read Steam and game state: {err}");
+                return (true, true);
+            }
+        };
         let game_running = !signals.is_empty();
         let mut status = lock_status(&self.status);
         status.steam_running = Some(steam_running);
@@ -383,8 +425,18 @@ impl Runner {
                 None
             }
             Effect::StartSync { restart_steam } => {
+                lock_status(&self.status).syncing = true;
                 self.publish();
                 let outcome = self.run_sync(restart_steam).await;
+                let quit = {
+                    let mut status = lock_status(&self.status);
+                    status.syncing = false;
+                    std::mem::take(&mut status.quit_after_sync)
+                };
+                if quit {
+                    // Steam is running again (or was never stopped): the quit can happen.
+                    self.ui.exit();
+                }
                 if let Some(err) = &outcome.steam_start_error {
                     self.ui
                         .notify(&format!("Steam could not be started again: {err}"));
@@ -424,6 +476,7 @@ impl Runner {
             self.enabled(),
             self.paused,
             &self.blocked,
+            self.checked,
         );
         {
             let mut status = lock_status(&self.status);
@@ -435,11 +488,15 @@ impl Runner {
     }
 }
 
-/// Runs until every input sender is gone. The first check happens at once.
-pub async fn run_loop(mut runner: Runner, mut inputs: UnboundedReceiver<RunnerInput>) {
+/// Runs until every input sender is gone. The first check happens after `first_check`.
+pub async fn run_loop(
+    mut runner: Runner,
+    mut inputs: UnboundedReceiver<RunnerInput>,
+    first_check: Duration,
+) {
     let mut ticker = tokio::time::interval(PROBE_TICK);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    let mut next_check = tokio::time::Instant::now();
+    let mut next_check = tokio::time::Instant::now() + first_check;
     loop {
         tokio::select! {
             _ = ticker.tick() => {
@@ -461,20 +518,22 @@ pub async fn run_loop(mut runner: Runner, mut inputs: UnboundedReceiver<RunnerIn
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::autosync::machine::ChangeSet;
+    use crate::autosync::{machine::ChangeSet, probes::GameSignal};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     struct FakeWork {
-        settings: Result<Settings, String>,
+        settings: Mutex<Result<Settings, String>>,
         results: Mutex<VecDeque<CheckResult>>,
         checks: AtomicUsize,
         syncs: Mutex<Vec<bool>>,
         outcome: ExecOutcome,
+        /// Runs inside `sync`, to look at the world while the import runs.
+        during_sync: Mutex<Option<Box<dyn Fn() + Send>>>,
     }
 
     impl Work for FakeWork {
         fn load_settings(&self) -> Result<Settings, String> {
-            self.settings.clone()
+            self.settings.lock().expect("settings lock").clone()
         }
         fn check(&self, _settings: &Settings) -> Result<CheckOutput, String> {
             self.checks.fetch_add(1, Ordering::SeqCst);
@@ -491,6 +550,9 @@ mod tests {
         }
         fn sync(&self, _settings: &Settings, restart_steam: bool) -> ExecOutcome {
             self.syncs.lock().expect("syncs lock").push(restart_steam);
+            if let Some(during) = self.during_sync.lock().expect("during lock").as_ref() {
+                during();
+            }
             self.outcome.clone()
         }
     }
@@ -498,18 +560,44 @@ mod tests {
     struct FakeProbes {
         steam: AtomicBool,
         game: AtomicBool,
+        /// Readings returned on top of `game` (a full-screen app).
+        extra: Mutex<Vec<SignalReading>>,
+        threads: Mutex<Vec<std::thread::ThreadId>>,
+    }
+
+    impl FakeProbes {
+        fn new(steam: bool, game: bool) -> Self {
+            Self {
+                steam: AtomicBool::new(steam),
+                game: AtomicBool::new(game),
+                extra: Mutex::new(Vec::new()),
+                threads: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn record_thread(&self) {
+            self.threads
+                .lock()
+                .expect("threads lock")
+                .push(std::thread::current().id());
+        }
     }
 
     impl Probes for FakeProbes {
         fn steam_running(&self) -> bool {
+            self.record_thread();
             self.steam.load(Ordering::SeqCst)
         }
-        fn game_signals(&self) -> Vec<GameSignal> {
+        fn game_signals(&self) -> Vec<SignalReading> {
+            self.record_thread();
+            let mut readings = self.extra.lock().expect("extra lock").clone();
             if self.game.load(Ordering::SeqCst) {
-                vec![GameSignal::FullScreen]
-            } else {
-                Vec::new()
+                readings.push(SignalReading {
+                    signal: GameSignal::FullScreen,
+                    detail: None,
+                });
             }
+            readings
         }
         fn set_game_dirs(&self, _dirs: Vec<PathBuf>) {}
     }
@@ -547,6 +635,9 @@ mod tests {
         fn set_autostart(&self, enabled: bool) {
             self.record(format!("autostart:{enabled}"));
         }
+        fn exit(&self) {
+            self.record("exit".to_string());
+        }
     }
 
     /// Built from the embedded defaults, never from the user's config file.
@@ -579,11 +670,12 @@ mod tests {
         outcome: ExecOutcome,
     ) -> Arc<FakeWork> {
         Arc::new(FakeWork {
-            settings,
+            settings: Mutex::new(settings),
             results: Mutex::new(results.into()),
             checks: AtomicUsize::new(0),
             syncs: Mutex::new(Vec::new()),
             outcome,
+            during_sync: Mutex::new(None),
         })
     }
 
@@ -595,10 +687,7 @@ mod tests {
     }
 
     fn harness(work: Arc<FakeWork>, steam: bool, game: bool) -> Harness {
-        let probes = Arc::new(FakeProbes {
-            steam: AtomicBool::new(steam),
-            game: AtomicBool::new(game),
-        });
+        let probes = Arc::new(FakeProbes::new(steam, game));
         let ui = Arc::new(FakeUi::default());
         let status: SharedStatus = Arc::new(Mutex::new(AutosyncStatus {
             available: true,
@@ -710,10 +799,7 @@ mod tests {
             inner: work(Ok(settings(true)), vec![blocked], ok()),
             fail: AtomicBool::new(false),
         });
-        let probes = Arc::new(FakeProbes {
-            steam: AtomicBool::new(false),
-            game: AtomicBool::new(false),
-        });
+        let probes = Arc::new(FakeProbes::new(false, false));
         let status: SharedStatus = Arc::new(Mutex::new(AutosyncStatus::default()));
         let mut runner = Runner::new(
             flaky.clone(),
@@ -811,9 +897,143 @@ mod tests {
         assert!(work.syncs.lock().expect("lock").is_empty());
         assert_eq!(
             lock_status(&h.status).game_signals,
-            vec![GameSignal::FullScreen]
+            vec![SignalReading {
+                signal: GameSignal::FullScreen,
+                detail: None
+            }]
         );
         assert!(!h.runner.is_idle());
+    }
+
+    #[tokio::test]
+    async fn the_status_says_syncing_only_while_the_import_runs() {
+        let work = work(Ok(settings(true)), vec![one_new_game()], ok());
+        let mut h = harness(work.clone(), false, false);
+        let seen = Arc::new(Mutex::new(None));
+        let (status, seen_in_sync) = (h.status.clone(), seen.clone());
+        *work.during_sync.lock().expect("lock") = Some(Box::new(move || {
+            *seen_in_sync.lock().expect("lock") = Some(lock_status(&status).syncing);
+        }));
+        assert!(!lock_status(&h.status).syncing);
+        h.runner.check(1_000, false).await;
+        assert_eq!(*seen.lock().expect("lock"), Some(true));
+        assert!(!lock_status(&h.status).syncing);
+    }
+
+    #[tokio::test]
+    async fn a_quit_during_the_import_waits_for_it_then_exits() {
+        let work = work(Ok(settings(true)), vec![one_new_game()], ok());
+        let mut h = harness(work.clone(), false, false);
+        let handle = AutosyncHandle {
+            inputs: None,
+            status: h.status.clone(),
+            probes: None,
+        };
+        let allowed = Arc::new(Mutex::new(None));
+        let (quitter, allowed_in_sync) = (handle.clone(), allowed.clone());
+        *work.during_sync.lock().expect("lock") = Some(Box::new(move || {
+            *allowed_in_sync.lock().expect("lock") = Some(quitter.request_exit());
+        }));
+        h.runner.check(1_000, false).await;
+        assert_eq!(*allowed.lock().expect("lock"), Some(false));
+        assert_eq!(*work.syncs.lock().expect("lock"), vec![false]);
+        assert!(h.ui.calls().contains(&"exit".to_string()));
+        assert!(handle.request_exit(), "nothing left to wait for");
+    }
+
+    #[tokio::test]
+    async fn without_an_import_quitting_is_allowed_and_nothing_exits_later() {
+        let work = work(Ok(settings(true)), vec![one_new_game()], ok());
+        let mut h = harness(work.clone(), false, false);
+        let handle = AutosyncHandle {
+            inputs: None,
+            status: h.status.clone(),
+            probes: None,
+        };
+        assert!(handle.request_exit());
+        h.runner.check(1_000, false).await;
+        assert!(!h.ui.calls().contains(&"exit".to_string()));
+    }
+
+    #[tokio::test]
+    async fn the_probes_run_off_the_async_thread() {
+        let work = work(Ok(settings(true)), vec![one_new_game()], ok());
+        let mut h = harness(work, true, false);
+        h.runner.check(1_000, false).await;
+        h.runner.probe(2_000).await;
+        let threads = h.probes.threads.lock().expect("lock").clone();
+        assert!(!threads.is_empty());
+        assert!(
+            !threads.contains(&std::thread::current().id()),
+            "a probe ran on the runtime thread"
+        );
+    }
+
+    #[tokio::test]
+    async fn steams_running_app_is_ignored_while_steam_is_closed() {
+        let work = work(Ok(settings(true)), vec![one_new_game()], ok());
+        let h = harness(work.clone(), false, false);
+        h.probes.extra.lock().expect("lock").push(SignalReading {
+            signal: GameSignal::SteamRunningApp,
+            detail: Some("app 220".to_string()),
+        });
+        let mut h = h;
+        h.runner.check(1_000, false).await;
+        assert!(lock_status(&h.status).game_signals.is_empty());
+        assert_eq!(*work.syncs.lock().expect("lock"), vec![false]);
+
+        h.probes.steam.store(true, Ordering::SeqCst);
+        h.runner.probe(2_000).await;
+        assert_eq!(
+            lock_status(&h.status).game_signals,
+            vec![SignalReading {
+                signal: GameSignal::SteamRunningApp,
+                detail: Some("app 220".to_string())
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn the_status_names_the_program_that_counts_as_a_game() {
+        let work = work(Ok(settings(true)), vec![one_new_game()], ok());
+        let mut h = harness(work, true, false);
+        let reading = SignalReading {
+            signal: GameSignal::GameFolderProcess,
+            detail: Some(r"C:\Games\Celeste\Celeste.exe".to_string()),
+        };
+        h.probes.extra.lock().expect("lock").push(reading.clone());
+        h.runner.check(1_000, false).await;
+        assert_eq!(lock_status(&h.status).game_signals, vec![reading]);
+    }
+
+    #[tokio::test]
+    async fn turning_autosync_on_checks_at_once() {
+        let work = work(Ok(settings(false)), vec![one_new_game()], ok());
+        let mut h = harness(work.clone(), false, false);
+        h.runner.check(1_000, false).await;
+        assert_eq!(work.checks.load(Ordering::SeqCst), 0);
+
+        *work.settings.lock().expect("lock") = Ok(settings(true));
+        h.runner.input(RunnerInput::SettingsChanged, 2_000).await;
+        assert_eq!(work.checks.load(Ordering::SeqCst), 1);
+
+        // Other settings changes while on wait for the interval.
+        h.runner.input(RunnerInput::SettingsChanged, 3_000).await;
+        assert_eq!(work.checks.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn before_the_first_check_the_status_says_so() {
+        let work = work(Ok(settings(true)), vec![], ok());
+        let mut h = harness(work.clone(), false, false);
+        // Paused: loading the settings does not check.
+        h.runner.input(RunnerInput::TogglePause, 0).await;
+        h.runner.input(RunnerInput::SettingsChanged, 0).await;
+        h.runner.input(RunnerInput::TogglePause, 0).await;
+        assert_eq!(work.checks.load(Ordering::SeqCst), 0);
+        assert_eq!(lock_status(&h.status).summary, "Not checked yet");
+        h.runner.check(1_000, false).await;
+        assert_eq!(lock_status(&h.status).summary, "Up to date");
     }
 
     #[test]
@@ -825,15 +1045,28 @@ mod tests {
             },
             after_failure: false,
         };
-        assert_eq!(describe(&State::Idle, false, false, &[]), "Autosync is off");
-        assert_eq!(describe(&State::Idle, true, true, &[]), "Autosync paused");
         assert_eq!(
-            describe(&State::Idle, true, false, &["Epic".to_string()]),
+            describe(&State::Idle, false, false, &[], true),
+            "Autosync is off"
+        );
+        assert_eq!(
+            describe(&State::Idle, true, true, &[], true),
+            "Autosync paused"
+        );
+        assert_eq!(
+            describe(&State::Idle, true, false, &["Epic".to_string()], true),
             "Blocked: Epic"
         );
-        assert_eq!(describe(&State::Idle, true, false, &[]), "Up to date");
-        assert_eq!(describe(&pending, true, false, &[]), "2 games pending");
-        assert_eq!(describe(&pending, true, true, &[]), "2 games pending");
+        assert_eq!(describe(&State::Idle, true, false, &[], true), "Up to date");
+        assert_eq!(
+            describe(&State::Idle, true, false, &[], false),
+            "Not checked yet"
+        );
+        assert_eq!(
+            describe(&pending, true, false, &[], true),
+            "2 games pending"
+        );
+        assert_eq!(describe(&pending, true, true, &[], true), "2 games pending");
     }
 
     #[test]

@@ -83,7 +83,9 @@ export const AutosyncSection = ({
 
   if (!status?.available) return null;
   const autosync = settings.autosync ?? {};
-  const signals = status.game_signals.map((signal) => SIGNAL_LABELS[signal]).join(", ");
+  const signals = status.game_signals
+    .map(({ signal, detail }) => (detail ? `${SIGNAL_LABELS[signal]} (${detail})` : SIGNAL_LABELS[signal]))
+    .join(", ");
 
   return (
     <Section title="Autosync" hint="Imports new and removed games by itself while BoilR waits in the tray. Steam is never closed while you play.">

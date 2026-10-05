@@ -15,6 +15,7 @@ use tauri_plugin_notification::NotificationExt;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 
 use super::{
+    first_check_delay,
     live::LiveWork,
     probes::create_probes,
     prompt_corner,
@@ -81,7 +82,8 @@ pub fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         status,
         probes: Some(probes),
     });
-    tauri::async_runtime::spawn(run_loop(runner, receiver));
+    let args: Vec<String> = std::env::args().collect();
+    tauri::async_runtime::spawn(run_loop(runner, receiver, first_check_delay(&args)));
     Ok(())
 }
 
@@ -106,6 +108,7 @@ fn build_tray(
                     return;
                 }
                 MENU_QUIT => {
+                    // Waits for a running import: see `on_run_event`.
                     app.exit(0);
                     return;
                 }
@@ -149,16 +152,7 @@ impl AutosyncUi for TauriUi {
     }
 
     fn notify(&self, text: &str) {
-        if let Err(err) = self
-            .app
-            .notification()
-            .builder()
-            .title("BoilR")
-            .body(text)
-            .show()
-        {
-            eprintln!("Could not show a notification: {err}");
-        }
+        notify(&self.app, text);
     }
 
     fn set_tooltip(&self, text: &str) {
@@ -190,6 +184,22 @@ impl AutosyncUi for TauriUi {
         if let Err(err) = result {
             eprintln!("Could not change start with Windows: {err}");
         }
+    }
+
+    fn exit(&self) {
+        self.app.exit(0);
+    }
+}
+
+pub fn notify(app: &AppHandle, text: &str) {
+    if let Err(err) = app
+        .notification()
+        .builder()
+        .title("BoilR")
+        .body(text)
+        .show()
+    {
+        eprintln!("Could not show a notification: {err}");
     }
 }
 

@@ -1,7 +1,11 @@
 //! Windows answers for the probes. Only compiled on Windows: CI's tauri_Windows job is the
 //! only build that checks this file.
 
-use std::{path::PathBuf, sync::RwLock};
+use std::{
+    ffi::OsStr,
+    path::PathBuf,
+    sync::{Mutex, MutexGuard, RwLock},
+};
 
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 use windows_sys::Win32::UI::Shell::{
@@ -9,11 +13,15 @@ use windows_sys::Win32::UI::Shell::{
 };
 use winreg::{enums::HKEY_CURRENT_USER, RegKey};
 
-use super::probes::{is_in_game_dir, GameSignal, Probes};
+use super::probes::{is_in_game_dir, GameSignal, Probes, SignalReading};
+
+const STEAM_BINARY: &str = "steam.exe";
 
 pub struct WindowsProbes {
     dirs: RwLock<Vec<PathBuf>>,
     windows_dir: PathBuf,
+    /// Kept between readings, so a process's executable path is read once, not every 5 s.
+    system: Mutex<System>,
 }
 
 impl Default for WindowsProbes {
@@ -24,38 +32,51 @@ impl Default for WindowsProbes {
         Self {
             dirs: RwLock::new(Vec::new()),
             windows_dir,
+            system: Mutex::new(System::new()),
         }
     }
 }
 
 impl WindowsProbes {
-    fn process_in_game_dir(&self) -> bool {
-        let dirs = match self.dirs.read() {
-            Ok(dirs) => dirs.clone(),
-            Err(poisoned) => poisoned.into_inner().clone(),
-        };
-        if dirs.is_empty() {
-            return false;
-        }
-        let mut system = System::new();
+    /// The process list, refreshed: new processes get their name and executable path,
+    /// ended ones are dropped.
+    fn processes(&self) -> MutexGuard<'_, System> {
+        let mut system = self
+            .system
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         system.refresh_processes_specifics(
             ProcessesToUpdate::All,
             true,
             ProcessRefreshKind::nothing().with_exe(UpdateKind::OnlyIfNotSet),
         );
         system
+    }
+
+    /// The executable of the first process running from a game folder.
+    fn process_in_game_dir(&self) -> Option<PathBuf> {
+        let dirs = match self.dirs.read() {
+            Ok(dirs) => dirs.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        };
+        if dirs.is_empty() {
+            return None;
+        }
+        self.processes()
             .processes()
             .values()
             .filter_map(|process| process.exe())
-            .any(|exe| is_in_game_dir(exe, &dirs, &self.windows_dir))
+            .find(|exe| is_in_game_dir(exe, &dirs, &self.windows_dir))
+            .map(PathBuf::from)
     }
 
-    fn steam_reports_running_app() -> bool {
+    /// The app id Steam says is running, when not 0.
+    fn steam_running_app() -> Option<u32> {
         RegKey::predef(HKEY_CURRENT_USER)
             .open_subkey(r"Software\Valve\Steam")
             .and_then(|key| key.get_value::<u32, _>("RunningAppID"))
-            .map(|app_id| app_id != 0)
-            .unwrap_or(false)
+            .ok()
+            .filter(|app_id| *app_id != 0)
     }
 
     fn full_screen_app() -> bool {
@@ -72,20 +93,33 @@ impl WindowsProbes {
 }
 
 impl Probes for WindowsProbes {
+    /// Matched by process name, never by PID.
     fn steam_running(&self) -> bool {
-        boilr_core::steam::is_steam_running()
+        self.processes()
+            .processes_by_name(OsStr::new(STEAM_BINARY))
+            .next()
+            .is_some()
     }
 
-    fn game_signals(&self) -> Vec<GameSignal> {
+    fn game_signals(&self) -> Vec<SignalReading> {
         let mut signals = Vec::new();
-        if self.process_in_game_dir() {
-            signals.push(GameSignal::GameFolderProcess);
+        if let Some(exe) = self.process_in_game_dir() {
+            signals.push(SignalReading {
+                signal: GameSignal::GameFolderProcess,
+                detail: Some(exe.display().to_string()),
+            });
         }
-        if Self::steam_reports_running_app() {
-            signals.push(GameSignal::SteamRunningApp);
+        if let Some(app_id) = Self::steam_running_app() {
+            signals.push(SignalReading {
+                signal: GameSignal::SteamRunningApp,
+                detail: Some(format!("app id {app_id}")),
+            });
         }
         if Self::full_screen_app() {
-            signals.push(GameSignal::FullScreen);
+            signals.push(SignalReading {
+                signal: GameSignal::FullScreen,
+                detail: None,
+            });
         }
         signals
     }
