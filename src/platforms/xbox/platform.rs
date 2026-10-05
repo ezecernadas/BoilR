@@ -33,46 +33,32 @@ impl GamesPlatform for XboxPlatForm {
     }
 
     fn get_shortcut_info(&self) -> eyre::Result<Vec<crate::platforms::ShortcutToImport>> {
-        let command = include_str!("./xbox_games.ps1");
-        let res = run_powershell_command(command)?;
-        let apps: Vec<AppInfo> = serde_json::from_str(&res)?;
+        let apps = load_apps()?;
         let windows_dir = std::env::var("WinDir").unwrap_or("C:\\Windows".to_string());
         let explorer = Path::new(&windows_dir)
             .join("explorer.exe")
             .to_string_lossy()
             .to_string();
 
-        let name_getters: [fn(&AppInfo) -> eyre::Result<String>; 3] =
-            [get_name_from_game, get_name_from_config, get_name_from_xml];
-
-        let games_iter = apps
-            .iter()
-            .filter(|app| {
-                !(app.display_name.contains("DisplayName")
-                    || app.display_name.contains("ms-resource"))
+        let games_iter = apps.iter().filter_map(|game| {
+            let launch_url = format!("shell:AppsFolder\\{}", game.aum_id());
+            listed_name(game).map(|game_name| {
+                let shortcut = Shortcut::new(
+                    "0",
+                    &game_name,
+                    &explorer,
+                    &windows_dir,
+                    "",
+                    "",
+                    &launch_url,
+                );
+                ShortcutToImport {
+                    shortcut: shortcut.to_owned(),
+                    needs_proton: false,
+                    needs_symlinks: false,
+                }
             })
-            .filter_map(|game| {
-                let launch_url = format!("shell:AppsFolder\\{}", game.aum_id());
-                name_getters
-                    .iter()
-                    .find_map(|&f| f(game).ok())
-                    .map(|game_name| {
-                        let shortcut = Shortcut::new(
-                            "0",
-                            &game_name,
-                            &explorer,
-                            &windows_dir,
-                            "",
-                            "",
-                            &launch_url,
-                        );
-                        ShortcutToImport {
-                            shortcut: shortcut.to_owned(),
-                            needs_proton: false,
-                            needs_symlinks: false,
-                        }
-                    })
-            });
+        });
 
         Ok(games_iter.collect())
     }
@@ -86,6 +72,38 @@ impl GamesPlatform for XboxPlatForm {
         ui.heading("Xbox");
         ui.checkbox(&mut self.settings.enabled, "Import from Xbox");
     }
+}
+
+fn load_apps() -> eyre::Result<Vec<AppInfo>> {
+    let command = include_str!("./xbox_games.ps1");
+    let res = run_powershell_command(command)?;
+    Ok(serde_json::from_str(&res)?)
+}
+
+/// Apps whose display name Windows could not resolve are not offered as games.
+fn is_listed(app: &AppInfo) -> bool {
+    !(app.display_name.contains("DisplayName") || app.display_name.contains("ms-resource"))
+}
+
+const NAME_GETTERS: [fn(&AppInfo) -> eyre::Result<String>; 3] =
+    [get_name_from_game, get_name_from_config, get_name_from_xml];
+
+/// The name BoilR imports the app under, `None` for an app it does not import.
+fn listed_name(app: &AppInfo) -> Option<String> {
+    if !is_listed(app) {
+        return None;
+    }
+    NAME_GETTERS.iter().find_map(|&getter| getter(app).ok())
+}
+
+/// Install folders of the Xbox apps BoilR imports, so autosync can tell an Xbox game is
+/// running: its shortcut starts `explorer.exe` from the Windows folder.
+pub fn xbox_install_locations() -> eyre::Result<Vec<String>> {
+    Ok(load_apps()?
+        .into_iter()
+        .filter(|app| listed_name(app).is_some())
+        .map(|app| app.install_location)
+        .collect())
 }
 
 fn get_name_from_xml(app_info: &AppInfo) -> eyre::Result<String> {
@@ -186,5 +204,39 @@ impl FromSettingsString for XboxPlatForm {
         XboxPlatForm {
             settings: load_settings(s),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn app(name: &str, kind: Kind) -> AppInfo {
+        AppInfo {
+            kind,
+            display_name: name.to_string(),
+            install_location: r"C:\BoilRTestMissing\XboxGames\Game\Content".to_string(),
+            family_name: "family".to_string(),
+        }
+    }
+
+    #[test]
+    fn unresolved_names_are_not_listed() {
+        assert!(is_listed(&app("Halo Infinite", Kind::Null)));
+        assert!(!is_listed(&app("ms-resource:AppName", Kind::Null)));
+        assert!(!is_listed(&app("DisplayName", Kind::Null)));
+    }
+
+    #[test]
+    fn only_imported_apps_have_a_listed_name() {
+        let game = app("Halo Infinite", Kind::Str("Game".to_string()));
+        assert_eq!(listed_name(&game), Some("Halo Infinite".to_string()));
+
+        let unresolved_game = app("ms-resource:AppName", Kind::Str("Game".to_string()));
+        assert_eq!(listed_name(&unresolved_game), None);
+
+        // Not a game and no MicrosoftGame.config or manifest to name it: Spotify and the like.
+        let other_app = app("Spotify", Kind::Null);
+        assert_eq!(listed_name(&other_app), None);
     }
 }

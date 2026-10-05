@@ -40,3 +40,5 @@ pub use platforms_load::get_platforms;
 pub(crate) use platforms_load::load_settings;
 pub(crate) use platforms_load::FromSettingsString;
 pub use platforms_load::Platforms;
+#[cfg(not(target_family = "unix"))]
+pub use xbox::xbox_install_locations;

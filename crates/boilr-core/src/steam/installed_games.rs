@@ -27,6 +27,14 @@ pub fn get_installed_games(settings: &SteamSettings) -> Vec<SteamGameInfo> {
     games
 }
 
+/// The `steamapps/common` folder of every Steam library: where Steam games run from.
+pub fn get_steam_common_folders(settings: &SteamSettings) -> Vec<PathBuf> {
+    get_install_folders(settings)
+        .into_iter()
+        .map(|folder| folder.join("common"))
+        .collect()
+}
+
 fn get_install_folders(settings: &SteamSettings) -> Vec<PathBuf> {
     let mut result = vec![];
     if let Ok(path) = get_steam_path(settings) {
@@ -96,6 +104,30 @@ mod tests {
         let game_info = game_info.unwrap();
         assert_eq!("Wildermyth", game_info.name);
         assert_eq!(763890, game_info.appid);
+    }
+
+    #[test]
+    fn common_folders_come_from_libraryfolders_vdf() {
+        let root = std::env::temp_dir().join("boilr-common-folders-test");
+        let _ = std::fs::remove_dir_all(&root);
+        let steam = root.join("steam");
+        let library = root.join("library");
+        std::fs::create_dir_all(steam.join("steamapps")).unwrap();
+        let vdf = format!(
+            "\"libraryfolders\"\n{{\n\t\"0\"\n\t{{\n\t\t\"path\"\t\t\"{}\"\n\t}}\n}}\n",
+            library.display()
+        );
+        std::fs::write(steam.join("steamapps").join("libraryfolders.vdf"), vdf).unwrap();
+        let settings = SteamSettings {
+            location: Some(steam.to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            get_steam_common_folders(&settings),
+            vec![library.join("steamapps").join("common")]
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     // #[test]

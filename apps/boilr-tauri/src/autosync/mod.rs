@@ -6,3 +6,6 @@
 pub mod detect;
 pub mod executor;
 pub mod machine;
+pub mod probes;
+#[cfg(windows)]
+mod probes_windows;
