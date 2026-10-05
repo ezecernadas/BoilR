@@ -16,19 +16,21 @@ const NumberSetting = ({
   hint,
   value,
   min,
+  max,
   onSave,
 }: {
   title: string;
   hint: string;
   value: number;
   min: number;
+  max: number;
   onSave: (value: number) => void;
 }) => {
   const [draft, setDraft] = useState(String(value));
   useEffect(() => setDraft(String(value)), [value]);
   const commit = () => {
     const parsed = Number.parseInt(draft, 10);
-    if (Number.isNaN(parsed) || parsed < min) {
+    if (Number.isNaN(parsed) || parsed < min || parsed > max) {
       setDraft(String(value));
       return;
     }
@@ -39,6 +41,7 @@ const NumberSetting = ({
       <input
         type="number"
         min={min}
+        max={max}
         value={draft}
         aria-label={title}
         onChange={(e) => setDraft(e.target.value)}
@@ -89,16 +92,18 @@ export const AutosyncSection = ({
       </SettingRow>
       <NumberSetting
         title="Check every"
-        hint="Minutes between two checks."
+        hint="Minutes between two checks, up to 1440 (a day)."
         value={autosync.interval_minutes ?? 5}
         min={1}
+        max={1440}
         onSave={(v) => onUpdate({ autosync: { interval_minutes: v } })}
       />
       <NumberSetting
         title="Countdown"
-        hint="Seconds the prompt waits before Steam restarts."
+        hint="Seconds the prompt waits before Steam restarts, up to 3600."
         value={autosync.countdown_seconds ?? 60}
         min={10}
+        max={3600}
         onSave={(v) => onUpdate({ autosync: { countdown_seconds: v } })}
       />
       <SettingRow title="Start with Windows" hint="Starts BoilR hidden in the tray when you sign in.">
