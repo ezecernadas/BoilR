@@ -5,7 +5,13 @@
 
 pub mod detect;
 pub mod executor;
+pub mod live;
 pub mod machine;
 pub mod probes;
 #[cfg(windows)]
 mod probes_windows;
+pub mod runner;
+
+// Task 7 manages it as Tauri state.
+#[cfg_attr(not(windows), allow(unused_imports))]
+pub use runner::AutosyncHandle;

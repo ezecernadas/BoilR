@@ -292,9 +292,20 @@ fn perform_full_sync(
     manage_steam: bool,
 ) -> Result<SyncOutcome, String> {
     let settings = Settings::new().map_err(|err| err.to_string())?;
+    let snapshots = gather_platform_snapshots();
+    sync_snapshots(settings, snapshots, progress, manage_steam)
+}
+
+/// The import itself, from snapshots the caller already gathered (autosync checks them for
+/// failed platforms first).
+fn sync_snapshots(
+    settings: Settings,
+    snapshots: Vec<PlatformSnapshot>,
+    progress: Option<tokio::sync::watch::Sender<SyncProgress>>,
+    manage_steam: bool,
+) -> Result<SyncOutcome, String> {
     let rename_map = load_rename_map();
 
-    let snapshots = gather_platform_snapshots();
     let mut platform_errors = Vec::new();
     let mut platform_shortcuts: Vec<(String, Vec<ShortcutToImport>)> = Vec::new();
 
