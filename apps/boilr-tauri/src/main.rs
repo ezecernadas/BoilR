@@ -127,7 +127,7 @@ async fn run_full_sync(
         }
     });
 
-    tauri::async_runtime::spawn_blocking(move || perform_full_sync(Some(progress_tx)))
+    tauri::async_runtime::spawn_blocking(move || perform_full_sync(Some(progress_tx), true))
         .await
         .map_err(|err| err.to_string())?
 }
@@ -289,6 +289,7 @@ fn main() {
 
 fn perform_full_sync(
     progress: Option<tokio::sync::watch::Sender<SyncProgress>>,
+    manage_steam: bool,
 ) -> Result<SyncOutcome, String> {
     let settings = Settings::new().map_err(|err| err.to_string())?;
     let rename_map = load_rename_map();
@@ -344,7 +345,7 @@ fn perform_full_sync(
         });
     }
 
-    if settings.steam.stop_steam {
+    if manage_steam && settings.steam.stop_steam {
         ensure_steam_stopped(&settings.steam);
     }
 
@@ -380,7 +381,7 @@ fn perform_full_sync(
         eprintln!("Could not fix shortcuts with error {err}");
     }
 
-    if settings.steam.start_steam {
+    if manage_steam && settings.steam.start_steam {
         ensure_steam_started(&settings.steam);
     }
 

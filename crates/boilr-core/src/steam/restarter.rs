@@ -168,37 +168,48 @@ fn stop_steam_with_signals() {
     }
 }
 
+/// Whether a Steam client process is running, looked up by name.
+pub fn is_steam_running() -> bool {
+    !steam_pids().is_empty()
+}
+
+/// Start Steam unless it is running. An error says why it could not be started, such as
+/// a Steam folder without `steam.exe`.
 #[cfg(target_os = "windows")]
-pub fn ensure_steam_started(settings: &super::SteamSettings) {
-    let os_steam_name = OsStr::new(STEAM_BINARY);
-    let s = System::new_all();
-    let mut processes = s.processes_by_name(os_steam_name);
-    if processes.next().is_none() {
-        //no steam, we need to start it
-        println!("Starting steam");
-        let folder = super::get_steam_path(settings);
-        if let Ok(folder) = folder {
-            let path = std::path::Path::new(&folder).join(STEAM_BINARY);
-            let mut command = Command::new(path);
-            if let Err(e) = command.spawn() {
-                println!("Failed to start steam: {:?}", e);
-            };
-        }
+pub fn try_start_steam(settings: &super::SteamSettings) -> eyre::Result<()> {
+    if is_steam_running() {
+        return Ok(());
     }
+    let folder = super::get_steam_path(settings)?;
+    let path = std::path::Path::new(&folder).join(STEAM_BINARY);
+    if !path.exists() {
+        return Err(eyre::format_err!(
+            "Steam was not found at {}",
+            path.display()
+        ));
+    }
+    println!("Starting steam");
+    if let Err(e) = Command::new(&path).spawn() {
+        return Err(eyre::format_err!("Could not start {}: {e}", path.display()));
+    }
+    Ok(())
 }
 
 #[cfg(target_family = "unix")]
-pub fn ensure_steam_started(_settings: &super::SteamSettings) {
-    let os_steam_name = OsStr::new(STEAM_BINARY);
-    let s = System::new_all();
-    let mut processes = s.processes_by_name(os_steam_name);
-    if processes.next().is_none() {
-        //no steam, we need to start it
-        println!("Starting steam");
-        let mut command = Command::new(STEAM_BINARY);
-        if let Err(e) = command.spawn() {
-            println!("Failed to start steam: {e:?}");
-        };
+pub fn try_start_steam(_settings: &super::SteamSettings) -> eyre::Result<()> {
+    if is_steam_running() {
+        return Ok(());
+    }
+    println!("Starting steam");
+    if let Err(e) = Command::new(STEAM_BINARY).spawn() {
+        return Err(eyre::format_err!("Could not start {STEAM_BINARY}: {e}"));
+    }
+    Ok(())
+}
+
+pub fn ensure_steam_started(settings: &super::SteamSettings) {
+    if let Err(e) = try_start_steam(settings) {
+        println!("Failed to start steam: {e}");
     }
 }
 
@@ -244,5 +255,25 @@ mod tests {
             Duration::from_secs(30)
         ));
         assert!(start.elapsed() < Duration::from_secs(5));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn starting_steam_from_a_missing_folder_is_an_error() {
+        let settings = super::super::SteamSettings {
+            location: Some(r"C:\boilr-test-no-steam-here".to_string()),
+            ..Default::default()
+        };
+        let result = try_start_steam(&settings);
+        if is_steam_running() {
+            // Nothing to start on a machine where Steam is open.
+            assert!(result.is_ok());
+        } else {
+            let message = result.err().map(|e| e.to_string()).unwrap_or_default();
+            assert!(
+                message.contains("boilr-test-no-steam-here"),
+                "got {message:?}"
+            );
+        }
     }
 }
