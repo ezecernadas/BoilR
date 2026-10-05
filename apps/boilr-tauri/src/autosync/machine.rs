@@ -86,7 +86,10 @@ pub enum Event {
         game_running: bool,
         now: Millis,
     },
-    RestartNow,
+    RestartNow {
+        steam_running: bool,
+        game_running: bool,
+    },
     NotNow,
     SyncNow {
         steam_running: bool,
@@ -263,29 +266,22 @@ impl Machine {
                     now,
                 },
             ) => self.probe(state, steam_running, game_running, now),
-            (State::Countdown { change, .. }, Event::RestartNow) => {
-                let (next, mut effects) = Self::sync(change, true);
-                effects.insert(0, Effect::HidePrompt);
-                (next, effects)
-            }
             (
                 State::Countdown { change, .. },
-                Event::SyncNow {
+                Event::RestartNow {
+                    steam_running,
+                    game_running,
+                }
+                | Event::SyncNow {
                     steam_running,
                     game_running,
                 },
             ) => {
-                // Like Sync now from a waiting state, but the prompt is open: close it.
-                let (next, mut effects) = if !steam_running {
-                    Self::sync(change, false)
-                } else if game_running {
-                    (
-                        State::WaitingForGame { change },
-                        vec![Effect::Notify(WAITS_FOR_GAME.to_string())],
-                    )
-                } else {
-                    Self::sync(change, true)
+                let waiting = State::WaitingForGame {
+                    change: change.clone(),
                 };
+                let (next, mut effects) =
+                    Self::manual_sync(change, waiting, steam_running, game_running);
                 effects.insert(0, Effect::HidePrompt);
                 (next, effects)
             }
@@ -389,12 +385,23 @@ impl Machine {
             State::Deferred { change, .. } | State::WaitingForGame { change } => change.clone(),
             _ => return (state, Vec::new()),
         };
+        Self::manual_sync(change, state, steam_running, game_running)
+    }
+
+    /// A user-requested import (Sync now, Restart now). Steam closed: import without
+    /// restarting it. Steam open under a running game: never restart it, stay in `waiting`.
+    fn manual_sync(
+        change: ChangeSet,
+        waiting: State,
+        steam_running: bool,
+        game_running: bool,
+    ) -> (State, Vec<Effect>) {
         if !steam_running {
             Self::sync(change, false)
-        } else if !game_running {
-            Self::sync(change, true)
+        } else if game_running {
+            (waiting, vec![Effect::Notify(WAITS_FOR_GAME.to_string())])
         } else {
-            (state, vec![Effect::Notify(WAITS_FOR_GAME.to_string())])
+            Self::sync(change, true)
         }
     }
 }
@@ -647,7 +654,10 @@ mod tests {
             change: c.clone(),
             deadline: 60_000,
         });
-        let effects = machine.handle(Event::RestartNow);
+        let effects = machine.handle(Event::RestartNow {
+            steam_running: true,
+            game_running: false,
+        });
         assert_eq!(
             effects,
             vec![
@@ -667,10 +677,10 @@ mod tests {
     }
 
     #[test]
-    fn countdown_sync_now_acts_like_restart_now() {
+    fn countdown_sync_now_with_steam_open_and_no_game_restarts_steam() {
         let c = change(&[1], &[]);
         let mut machine = machine_in(State::Countdown {
-            change: c,
+            change: c.clone(),
             deadline: 60_000,
         });
         let effects = machine.handle(Event::SyncNow {
@@ -686,6 +696,63 @@ mod tests {
                 }
             ]
         );
+        assert_eq!(
+            machine.state(),
+            &State::Syncing {
+                change: c,
+                restart_steam: true
+            }
+        );
+    }
+
+    #[test]
+    fn countdown_sync_now_with_steam_closed_imports_even_while_a_game_runs() {
+        let c = change(&[1], &[]);
+        let mut machine = machine_in(State::Countdown {
+            change: c.clone(),
+            deadline: 60_000,
+        });
+        let effects = machine.handle(Event::SyncNow {
+            steam_running: false,
+            game_running: true,
+        });
+        assert_eq!(
+            effects,
+            vec![
+                Effect::HidePrompt,
+                Effect::StartSync {
+                    restart_steam: false
+                }
+            ]
+        );
+        assert_eq!(
+            machine.state(),
+            &State::Syncing {
+                change: c,
+                restart_steam: false
+            }
+        );
+    }
+
+    #[test]
+    fn restart_now_during_countdown_while_playing_does_not_restart() {
+        let c = change(&[1], &[]);
+        let mut machine = machine_in(State::Countdown {
+            change: c.clone(),
+            deadline: 60_000,
+        });
+        let effects = machine.handle(Event::RestartNow {
+            steam_running: true,
+            game_running: true,
+        });
+        assert_eq!(
+            effects,
+            vec![
+                Effect::HidePrompt,
+                Effect::Notify(WAITS_FOR_GAME.to_string())
+            ]
+        );
+        assert_eq!(machine.state(), &State::WaitingForGame { change: c });
     }
 
     #[test]
