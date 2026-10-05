@@ -82,3 +82,11 @@ export const SettingRow = ({
     {children}
   </div>
 );
+
+export const Section = ({ title, hint, children }: { title: string; hint: string; children: ReactNode }) => (
+  <section className="border-t-3 border-harbour pt-5 first-of-type:border-t-0 first-of-type:pt-0">
+    <h2 className="font-pixel text-2xl text-foam">{title}</h2>
+    <p className="mt-1 max-w-prose text-mauve">{hint}</p>
+    <div className="mt-2 divide-y-2 divide-harbour/60">{children}</div>
+  </section>
+);

@@ -22,6 +22,7 @@ const game = (name: string, exe = `/games/${name}`): ShortcutSummary => ({
 let settings: Settings = {
   steam: { stop_steam: false, start_steam: false, create_collections: false, optimize_for_big_picture: false, location: null },
   steamgrid_db: { enabled: true, prefer_animated: false, allow_nsfw: false, only_download_boilr_images: false, auth_key: "sample-key" },
+  autosync: { enabled: false, interval_minutes: 5, countdown_seconds: 60, start_with_windows: true },
   blacklisted_games: [],
 };
 
@@ -186,6 +187,7 @@ mockIPC(
           ...a.update,
           steam: { ...settings.steam, ...a.update?.steam },
           steamgrid_db: { ...settings.steamgrid_db, ...a.update?.steamgrid_db },
+          autosync: { ...settings.autosync, ...a.update?.autosync },
         };
         return settings;
       case "discover_games":
@@ -296,6 +298,18 @@ mockIPC(
       case "autosync_close_prompt":
         console.info("[devMock]", cmd);
         return null;
+      case "autosync_status":
+        return {
+          available: true,
+          enabled: Boolean(settings.autosync?.enabled),
+          paused: false,
+          summary: settings.autosync?.enabled ? "2 games pending" : "Autosync is off",
+          prompt: null,
+          steam_running: true,
+          game_signals: ["full_screen"],
+          last_check_ms: Date.now() - 90_000,
+          last_check: "2 new games",
+        };
       default:
         console.warn("[devMock] unhandled command", cmd, args);
         return null;

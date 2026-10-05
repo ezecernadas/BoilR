@@ -154,9 +154,29 @@ fn plan_sync() -> Result<SyncPlan, String> {
 }
 
 #[tauri::command]
-fn update_settings(update: SettingsUpdate) -> Result<Settings, String> {
+fn update_settings(
+    autosync_handle: tauri::State<'_, autosync::AutosyncHandle>,
+    update: SettingsUpdate,
+) -> Result<Settings, String> {
     let mut settings = Settings::new().map_err(|err| err.to_string())?;
+    apply_settings_update(&mut settings, update);
 
+    let platforms = get_platforms();
+    let sections = collect_platform_sections(&platforms);
+    save_settings(&settings, &sections).map_err(|err| err.to_string())?;
+
+    // Hide-on-close follows the switch at once; the runner reloads the rest.
+    autosync::runner::lock_status(&autosync_handle.status).enabled = settings.autosync.enabled;
+    if let Err(err) = autosync_handle.send(autosync::runner::RunnerInput::SettingsChanged) {
+        if autosync::AVAILABLE {
+            eprintln!("Autosync did not get the new settings: {err}");
+        }
+    }
+
+    Ok(settings)
+}
+
+fn apply_settings_update(settings: &mut Settings, update: SettingsUpdate) {
     if let Some(steam) = update.steam {
         if let Some(value) = steam.stop_steam {
             settings.steam.stop_steam = value;
@@ -197,11 +217,20 @@ fn update_settings(update: SettingsUpdate) -> Result<Settings, String> {
         settings.blacklisted_games = blacklisted;
     }
 
-    let platforms = get_platforms();
-    let sections = collect_platform_sections(&platforms);
-    save_settings(&settings, &sections).map_err(|err| err.to_string())?;
-
-    Ok(settings)
+    if let Some(autosync) = update.autosync {
+        if let Some(value) = autosync.enabled {
+            settings.autosync.enabled = value;
+        }
+        if let Some(value) = autosync.interval_minutes {
+            settings.autosync.interval_minutes = value;
+        }
+        if let Some(value) = autosync.countdown_seconds {
+            settings.autosync.countdown_seconds = value;
+        }
+        if let Some(value) = autosync.start_with_windows {
+            settings.autosync.start_with_windows = value;
+        }
+    }
 }
 
 #[tauri::command]
@@ -303,7 +332,8 @@ fn main() {
             autosync::commands::autosync_prompt_info,
             autosync::commands::autosync_restart_now,
             autosync::commands::autosync_not_now,
-            autosync::commands::autosync_close_prompt
+            autosync::commands::autosync_close_prompt,
+            autosync::commands::autosync_status
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -910,6 +940,7 @@ struct SettingsUpdate {
     #[serde(rename = "steamgrid_db")]
     steamgrid_db: Option<SteamGridDbUpdate>,
     blacklisted_games: Option<Vec<u32>>,
+    autosync: Option<AutosyncSettingsUpdate>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -928,6 +959,14 @@ struct SteamGridDbUpdate {
     allow_nsfw: Option<bool>,
     only_download_boilr_images: Option<bool>,
     auth_key: Option<Option<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AutosyncSettingsUpdate {
+    enabled: Option<bool>,
+    interval_minutes: Option<u64>,
+    countdown_seconds: Option<u64>,
+    start_with_windows: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1012,7 +1051,8 @@ mod tests {
                 autosync::commands::autosync_prompt_info,
                 autosync::commands::autosync_restart_now,
                 autosync::commands::autosync_not_now,
-                autosync::commands::autosync_close_prompt
+                autosync::commands::autosync_close_prompt,
+                autosync::commands::autosync_status
             ])
             .build(mock_context(noop_assets()))
             .expect("failed to build tauri app for tests");
@@ -1050,6 +1090,40 @@ mod tests {
             .deserialize::<String>()
             .expect("invalid ping payload");
         assert_eq!(value, "pong");
+    }
+
+    #[test]
+    fn autosync_status_reports_unavailable_without_a_runner() {
+        let webview = build_mock_webview();
+        let response = get_ipc_response(&webview, invoke_request("autosync_status"))
+            .expect("autosync_status should succeed");
+        let status = response
+            .deserialize::<autosync::runner::AutosyncStatus>()
+            .expect("status payload");
+        assert!(!status.available);
+    }
+
+    #[test]
+    fn settings_update_sets_autosync_fields() {
+        // Built from the embedded defaults, never from the user's config file.
+        let mut settings: Settings = toml::from_str(include_str!(
+            "../../../crates/boilr-core/src/defaultconfig.toml"
+        ))
+        .expect("default config fills Settings");
+        let update: SettingsUpdate = serde_json::from_value(serde_json::json!({
+            "autosync": {
+                "enabled": true,
+                "interval_minutes": 7,
+                "countdown_seconds": 30,
+                "start_with_windows": false
+            }
+        }))
+        .expect("update payload");
+        apply_settings_update(&mut settings, update);
+        assert!(settings.autosync.enabled);
+        assert_eq!(settings.autosync.interval_minutes, 7);
+        assert_eq!(settings.autosync.countdown_seconds, 30);
+        assert!(!settings.autosync.start_with_windows);
     }
 
     #[test]

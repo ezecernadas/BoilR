@@ -41,6 +41,7 @@ const applySettingsPatch = (current: Settings | null, patch: SettingsUpdatePaylo
     ...current,
     steam: { ...(current.steam ?? {}), ...(patch.steam ?? {}) },
     steamgrid_db: { ...(current.steamgrid_db ?? {}), ...(patch.steamgrid_db ?? {}) },
+    autosync: { ...(current.autosync ?? {}), ...(patch.autosync ?? {}) },
     blacklisted_games: patch.blacklisted_games ? [...patch.blacklisted_games] : current.blacklisted_games,
   };
 };

@@ -4,7 +4,8 @@ import type { Settings } from "../settings";
 import type { SettingsUpdatePayload } from "../types";
 import type { PlatformFieldUpdate, PlatformSettingsField, PlatformSettingsGroup } from "../lib/platformSettings";
 import { groupHasChanges } from "../lib/platformSettings";
-import { SettingRow, Toggle } from "./controls";
+import { Section, SettingRow, Toggle } from "./controls";
+import { AutosyncSection } from "./AutosyncSection";
 import type { NavigationStatus } from "../lib/navigation";
 
 const FIELD_LABELS: Record<string, string> = {
@@ -16,14 +17,6 @@ const FIELD_LABELS: Record<string, string> = {
   create_symlinks: "Create folder shortcuts",
   safe_launch: "Launch through the launcher",
 };
-
-const Section = ({ title, hint, children }: { title: string; hint: string; children: React.ReactNode }) => (
-  <section className="border-t-3 border-harbour pt-5 first-of-type:border-t-0 first-of-type:pt-0">
-    <h2 className="font-pixel text-2xl text-foam">{title}</h2>
-    <p className="mt-1 max-w-prose text-mauve">{hint}</p>
-    <div className="mt-2 divide-y-2 divide-harbour/60">{children}</div>
-  </section>
-);
 
 const TextSetting = ({
   title,
@@ -183,6 +176,7 @@ export const SettingsView = ({
             onSave={(v) => onUpdate({ steam: { location: v } })}
           />
         </Section>
+        <AutosyncSection settings={settings} onUpdate={onUpdate} />
 
         <Section title="Artwork" hint="Covers, logos and backgrounds come from SteamGridDB, a free community site.">
           <TextSetting

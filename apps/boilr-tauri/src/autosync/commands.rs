@@ -3,7 +3,7 @@
 
 use tauri::State;
 
-use super::runner::{lock_status, AutosyncHandle, PromptInfo, RunnerInput};
+use super::runner::{lock_status, AutosyncHandle, AutosyncStatus, PromptInfo, RunnerInput};
 
 /// Text and deadline for the countdown window; `None` when no prompt is open.
 #[tauri::command]
@@ -31,4 +31,21 @@ pub fn autosync_close_prompt<R: tauri::Runtime>(
         return Err("Only the autosync prompt can be closed this way".to_string());
     }
     window.destroy().map_err(|err| err.to_string())
+}
+
+/// Status for the settings page, with fresh Steam and game readings so the diagnostics
+/// readout can be checked against a running game.
+#[tauri::command]
+pub async fn autosync_status(handle: State<'_, AutosyncHandle>) -> Result<AutosyncStatus, String> {
+    let mut status = lock_status(&handle.status).clone();
+    if let Some(probes) = handle.probes.clone() {
+        let (steam_running, signals) = tauri::async_runtime::spawn_blocking(move || {
+            (probes.steam_running(), probes.game_signals())
+        })
+        .await
+        .map_err(|err| err.to_string())?;
+        status.steam_running = Some(steam_running);
+        status.game_signals = signals;
+    }
+    Ok(status)
 }
