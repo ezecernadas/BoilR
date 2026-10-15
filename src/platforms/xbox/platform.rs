@@ -188,8 +188,17 @@ impl Kind {
     }
 }
 
+/// Keeps Windows from opening a console window for PowerShell when BoilR runs as a GUI app.
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 fn run_powershell_command(cmd: &str) -> Result<String, Error> {
-    let output = Command::new("powershell").arg("/c").arg(cmd).output()?;
+    use std::os::windows::process::CommandExt;
+
+    let output = Command::new("powershell")
+        .creation_flags(CREATE_NO_WINDOW)
+        .arg("/c")
+        .arg(cmd)
+        .output()?;
 
     match output.status.success() {
         true => Ok(String::from_utf8_lossy(&output.stdout).to_string()),
