@@ -123,9 +123,11 @@ trait Probes {
 - `steam_running`: reuse the `sysinfo` lookup `restarter.rs` already does
   (make it public in `boilr-core`).
 - `game_running` is true when **any** of these signals is true:
-  1. A process whose executable path is inside a known game directory: Steam
-     library `steamapps/common` folders, and the install folders of imported
-     games. Directories under `%WinDir%` are excluded, because Xbox shortcuts
+  1. A process whose executable path is inside a known game directory: the
+     install folders of imported games. Steam library `steamapps/common`
+     folders are not used: tools such as Wallpaper Engine run from there all
+     day without Steam reporting them as running, so Steam games rely on
+     signal 2. Directories under `%WinDir%` are excluded, because Xbox shortcuts
      launch through `explorer.exe`. The Xbox platform gains an accessor for
      `install_location` so its games are covered.
   2. Steam reports a running app (`HKCU\Software\Valve\Steam\RunningAppID` ≠ 0).

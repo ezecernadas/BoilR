@@ -5,7 +5,7 @@ use std::sync::Mutex;
 use boilr::renames::load_rename_map;
 use boilr_core::{
     settings::Settings,
-    steam::{ensure_steam_stopped, get_steam_common_folders, is_steam_running, try_start_steam},
+    steam::{ensure_steam_stopped, is_steam_running, try_start_steam},
 };
 
 use super::{
@@ -32,6 +32,8 @@ impl Work for LiveWork {
         let result = detect(&snapshots, settings, &renames, &current);
 
         // Launcher folders are left out: the launcher keeps running after the game ends.
+        // Steam library folders are left out too: tools such as Wallpaper Engine run from
+        // there all day; Steam's own RunningAppID covers Steam games.
         let mut raw: Vec<String> = snapshots
             .iter()
             .filter(|snapshot| snapshot.enabled)
@@ -43,11 +45,6 @@ impl Work for LiveWork {
                     .filter_map(|entry| game_start_dir(&snapshot.code_name, &entry.shortcut))
             })
             .collect();
-        raw.extend(
-            get_steam_common_folders(&settings.steam)
-                .into_iter()
-                .map(|folder| folder.to_string_lossy().into_owned()),
-        );
         raw.extend(xbox_dirs(&snapshots));
 
         Ok(CheckOutput {

@@ -13,7 +13,7 @@ use steam_shortcuts_util::shortcut::ShortcutOwned;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GameSignal {
-    /// A process runs from a Steam library or an imported game's folder.
+    /// A process runs from an imported game's folder.
     GameFolderProcess,
     /// `HKCU\Software\Valve\Steam\RunningAppID` is not 0.
     SteamRunningApp,
@@ -116,7 +116,7 @@ pub fn is_in_game_dir(exe: &Path, dirs: &[PathBuf], windows_dir: &Path) -> bool 
         .any(|dir| starts_with_dir(&exe, &normalize(&dir.to_string_lossy())))
 }
 
-/// Cleans raw folder strings (shortcut start folders, Steam libraries, Xbox install
+/// Cleans raw folder strings (shortcut start folders, Xbox install
 /// folders) into a de-duplicated list of specific folders.
 pub fn game_dirs(raw: impl IntoIterator<Item = String>) -> Vec<PathBuf> {
     let mut seen = BTreeSet::new();
