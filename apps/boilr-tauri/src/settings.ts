@@ -14,9 +14,17 @@ export type SteamGridDbSettings = {
   auth_key?: string | null;
 };
 
+export type AutosyncSettings = {
+  enabled?: boolean;
+  interval_minutes?: number;
+  countdown_seconds?: number;
+  start_with_windows?: boolean;
+};
+
 export type Settings = {
   steam?: SteamSettings;
   steamgrid_db?: SteamGridDbSettings;
+  autosync?: AutosyncSettings;
   blacklisted_games?: number[];
   [key: string]: unknown;
 };

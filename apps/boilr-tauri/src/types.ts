@@ -93,6 +93,12 @@ export type SettingsUpdatePayload = {
     only_download_boilr_images?: boolean;
     auth_key?: string | null;
   };
+  autosync?: {
+    enabled?: boolean;
+    interval_minutes?: number;
+    countdown_seconds?: number;
+    start_with_windows?: boolean;
+  };
   blacklisted_games?: number[];
 };
 
@@ -162,4 +168,32 @@ export type GameCandidate = {
 export type GameMatch = {
   current_id: number | null;
   candidates: GameCandidate[];
+};
+
+export type PromptInfo = {
+  summary: string;
+  /** Milliseconds since the Unix epoch. */
+  deadline_ms: number;
+};
+
+export type GameSignal = "game_folder_process" | "steam_running_app" | "full_screen";
+
+/** A signal that fired; `detail` says what fired it (a program's path, Steam's app id). */
+export type SignalReading = {
+  signal: GameSignal;
+  detail: string | null;
+};
+
+export type AutosyncStatus = {
+  available: boolean;
+  enabled: boolean;
+  paused: boolean;
+  summary: string;
+  prompt: PromptInfo | null;
+  steam_running: boolean | null;
+  game_signals: SignalReading[];
+  /** An import runs right now. */
+  syncing: boolean;
+  last_check_ms: number | null;
+  last_check: string | null;
 };

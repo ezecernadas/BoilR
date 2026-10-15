@@ -1,4 +1,7 @@
-use crate::{config::get_config_file, steam::SteamSettings, steamgriddb::SteamGridDbSettings};
+use crate::{
+    autosync::AutosyncSettings, config::get_config_file, steam::SteamSettings,
+    steamgriddb::SteamGridDbSettings,
+};
 
 use config::{Config, ConfigError, Environment, File};
 use serde::{Deserialize, Serialize};
@@ -11,6 +14,7 @@ pub struct Settings {
     pub blacklisted_games: Vec<u32>,
     pub steamgrid_db: SteamGridDbSettings,
     pub steam: SteamSettings,
+    pub autosync: AutosyncSettings,
 }
 
 impl Settings {
@@ -42,13 +46,17 @@ impl Settings {
 }
 
 pub fn load_setting_sections() -> eyre::Result<HashMap<String, String>> {
-    let config_file_path = get_config_file();
-    let content = std::fs::read_to_string(config_file_path)?;
+    let content = std::fs::read_to_string(get_config_file())?;
+    Ok(parse_setting_sections(&content))
+}
+
+/// Splits a config file into its `[section]` bodies, leaving out the sections that belong
+/// to `Settings` itself, so only platform sections remain.
+fn parse_setting_sections(content: &str) -> HashMap<String, String> {
     let mut result = HashMap::new();
-    let lines = content.lines();
     let mut current_section_lines: Vec<String> = vec![];
     let mut current_section_name: Option<String> = Option::None;
-    for line in lines {
+    for line in content.lines() {
         if line.starts_with('[') && line.ends_with(']') {
             add_sections(&current_section_name, &current_section_lines, &mut result);
             current_section_name = line.get(1..line.len() - 1).map(|s| s.to_string());
@@ -59,11 +67,11 @@ pub fn load_setting_sections() -> eyre::Result<HashMap<String, String>> {
     }
     add_sections(&current_section_name, &current_section_lines, &mut result);
 
-    let blacklisted_sections = ["steamgrid_db", "steam"];
+    let blacklisted_sections = ["steamgrid_db", "steam", "autosync"];
     for section in blacklisted_sections {
         let _ = result.remove(section);
     }
-    Ok(result)
+    result
 }
 
 /// Saves the settings followed by one `[code_name]` section per platform, given as
@@ -110,5 +118,46 @@ fn sanitize_auth_key(result: &mut Settings) {
         if auth_key == "Write your authentication key between these quotes" {
             result.steamgrid_db.auth_key = None;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    #![allow(clippy::expect_used)]
+
+    use super::*;
+    use crate::autosync::AutosyncSettings;
+
+    fn default_settings() -> Settings {
+        Config::builder()
+            .add_source(File::from_str(
+                include_str!("defaultconfig.toml"),
+                config::FileFormat::Toml,
+            ))
+            .build()
+            .expect("default config parses")
+            .try_deserialize()
+            .expect("default config fills Settings")
+    }
+
+    #[test]
+    fn default_config_loads_with_autosync_disabled() {
+        let settings = default_settings();
+        assert!(!settings.autosync.enabled, "autosync is opt-in");
+        assert_eq!(settings.autosync, AutosyncSettings::default());
+    }
+
+    #[test]
+    fn settings_sections_are_not_platform_sections() {
+        let sections = parse_setting_sections(
+            "debug = false\n[steam]\nstop_steam = false\n[autosync]\nenabled = true\n[epic_games]\nenabled = true\n",
+        );
+        assert!(!sections.contains_key("autosync"));
+        assert!(!sections.contains_key("steam"));
+        assert_eq!(
+            sections.get("epic_games").map(String::as_str),
+            Some("enabled = true\n")
+        );
     }
 }

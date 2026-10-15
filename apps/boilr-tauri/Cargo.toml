@@ -13,7 +13,7 @@ boilr-core = { path = "../../crates/boilr-core" }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 tauri = { version = "2.0.0", features = ["wry", "protocol-asset"] }
-tokio = { version = "1.41.0", features = ["rt-multi-thread"] }
+tokio = { version = "1.41.0", features = ["rt-multi-thread", "macros", "sync", "time"] }
 steam_shortcuts_util = "1.1.9"
 steamgriddb_api = "0.3.1"
 time = "0.3"
@@ -28,3 +28,12 @@ tauri = { version = "2.0.0", features = ["test", "wry"] }
 [features]
 # Launcher detection from inside the Flatpak sandbox (flatpak-spawn), as in the egui Flatpak.
 flatpak = ["boilr/flatpak"]
+
+[target.'cfg(windows)'.dependencies]
+sysinfo = "0.38.4"
+winreg = "0.56.0"
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_Shell"] }
+tauri = { version = "2.0.0", features = ["tray-icon"] }
+tauri-plugin-autostart = "2"
+tauri-plugin-notification = "2"
+tauri-plugin-single-instance = "2"

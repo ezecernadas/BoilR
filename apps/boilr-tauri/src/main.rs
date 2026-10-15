@@ -1,11 +1,12 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod artwork;
+mod autosync;
 mod library;
 
 use std::{
     collections::{HashMap, HashSet},
-    sync::Arc,
+    sync::{Arc, Mutex, MutexGuard, TryLockError},
 };
 
 use boilr::{
@@ -153,9 +154,29 @@ fn plan_sync() -> Result<SyncPlan, String> {
 }
 
 #[tauri::command]
-fn update_settings(update: SettingsUpdate) -> Result<Settings, String> {
+fn update_settings(
+    autosync_handle: tauri::State<'_, autosync::AutosyncHandle>,
+    update: SettingsUpdate,
+) -> Result<Settings, String> {
     let mut settings = Settings::new().map_err(|err| err.to_string())?;
+    apply_settings_update(&mut settings, update);
 
+    let platforms = get_platforms();
+    let sections = collect_platform_sections(&platforms);
+    save_settings(&settings, &sections).map_err(|err| err.to_string())?;
+
+    // Hide-on-close follows the switch at once; the runner reloads the rest.
+    autosync::runner::lock_status(&autosync_handle.status).enabled = settings.autosync.enabled;
+    if let Err(err) = autosync_handle.send(autosync::runner::RunnerInput::SettingsChanged) {
+        if autosync::AVAILABLE {
+            eprintln!("Autosync did not get the new settings: {err}");
+        }
+    }
+
+    Ok(settings)
+}
+
+fn apply_settings_update(settings: &mut Settings, update: SettingsUpdate) {
     if let Some(steam) = update.steam {
         if let Some(value) = steam.stop_steam {
             settings.steam.stop_steam = value;
@@ -196,11 +217,20 @@ fn update_settings(update: SettingsUpdate) -> Result<Settings, String> {
         settings.blacklisted_games = blacklisted;
     }
 
-    let platforms = get_platforms();
-    let sections = collect_platform_sections(&platforms);
-    save_settings(&settings, &sections).map_err(|err| err.to_string())?;
-
-    Ok(settings)
+    if let Some(autosync) = update.autosync {
+        if let Some(value) = autosync.enabled {
+            settings.autosync.enabled = value;
+        }
+        if let Some(value) = autosync.interval_minutes {
+            settings.autosync.interval_minutes = value;
+        }
+        if let Some(value) = autosync.countdown_seconds {
+            settings.autosync.countdown_seconds = value;
+        }
+        if let Some(value) = autosync.start_with_windows {
+            settings.autosync.start_with_windows = value;
+        }
+    }
 }
 
 #[tauri::command]
@@ -254,7 +284,7 @@ fn main() {
     if std::env::var_os("WEBKIT_DMABUF_RENDERER_FORCE_SHM").is_none() {
         std::env::set_var("WEBKIT_DMABUF_RENDERER_FORCE_SHM", "1");
     }
-    tauri::Builder::default()
+    let app = autosync::with_plugins(tauri::Builder::default())
         .setup(|app| {
             let handle = app.handle().clone();
             app.manage(ProgressEmitter(Arc::new(move |event, payload| {
@@ -262,8 +292,28 @@ fn main() {
                     eprintln!("Failed to emit {event} event: {err}");
                 }
             })));
+            autosync::setup(app)?;
+
+            // The main window is created hidden (tauri.conf.json) so a start from Windows'
+            // autostart never flashes it. Autosync that did not start (no tray) never hides it.
+            let args: Vec<String> = std::env::args().collect();
+            let available = autosync::AVAILABLE
+                && app
+                    .try_state::<autosync::AutosyncHandle>()
+                    .is_some_and(|handle| autosync::runner::lock_status(&handle.status).available);
+            let autosync_enabled = Settings::new()
+                .map(|settings| settings.autosync.enabled)
+                .unwrap_or(false);
+            if !autosync::start_hidden(&args, available, autosync_enabled) {
+                if let Some(window) = app.get_webview_window(autosync::MAIN_LABEL) {
+                    if let Err(err) = window.show() {
+                        eprintln!("Could not show the BoilR window: {err}");
+                    }
+                }
+            }
             Ok(())
         })
+        .on_window_event(autosync::on_window_event)
         .invoke_handler(tauri::generate_handler![
             load_settings,
             discover_games,
@@ -287,19 +337,58 @@ fn main() {
             artwork::set_artwork_game,
             artwork::find_missing_artwork,
             rename_game,
-            ping
+            ping,
+            autosync::commands::autosync_prompt_info,
+            autosync::commands::autosync_restart_now,
+            autosync::commands::autosync_not_now,
+            autosync::commands::autosync_close_prompt,
+            autosync::commands::autosync_status
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!());
+    match app {
+        Ok(app) => app.run(autosync::on_run_event),
+        Err(err) => {
+            eprintln!("error while running tauri application: {err}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// One import at a time. A manual import and an autosync import both rewrite every user's
+/// `shortcuts.vdf`, and autosync stops Steam: held for the whole of either.
+static IMPORT_LOCK: Mutex<()> = Mutex::new(());
+
+const AUTOSYNC_IMPORTING: &str = "Autosync is importing. Try again when it ends.";
+
+/// Takes the import lock, or says `busy` when another import holds it. The lock guards no
+/// data, so one left poisoned by a panicking import is simply taken.
+fn try_import_lock<'a>(lock: &'a Mutex<()>, busy: &str) -> Result<MutexGuard<'a, ()>, String> {
+    match lock.try_lock() {
+        Ok(guard) => Ok(guard),
+        Err(TryLockError::Poisoned(poisoned)) => Ok(poisoned.into_inner()),
+        Err(TryLockError::WouldBlock) => Err(busy.to_string()),
+    }
 }
 
 fn perform_full_sync(
     progress: Option<tokio::sync::watch::Sender<SyncProgress>>,
 ) -> Result<SyncOutcome, String> {
+    let _import = try_import_lock(&IMPORT_LOCK, AUTOSYNC_IMPORTING)?;
     let settings = Settings::new().map_err(|err| err.to_string())?;
+    let snapshots = gather_platform_snapshots();
+    sync_snapshots(settings, snapshots, progress, true)
+}
+
+/// The import itself, from snapshots the caller already gathered (autosync checks them for
+/// failed platforms first).
+fn sync_snapshots(
+    settings: Settings,
+    snapshots: Vec<PlatformSnapshot>,
+    progress: Option<tokio::sync::watch::Sender<SyncProgress>>,
+    manage_steam: bool,
+) -> Result<SyncOutcome, String> {
     let rename_map = load_rename_map();
 
-    let snapshots = gather_platform_snapshots();
     let mut platform_errors = Vec::new();
     let mut platform_shortcuts: Vec<(String, Vec<ShortcutToImport>)> = Vec::new();
 
@@ -350,7 +439,7 @@ fn perform_full_sync(
         });
     }
 
-    if settings.steam.stop_steam {
+    if manage_steam && settings.steam.stop_steam {
         ensure_steam_stopped(&settings.steam);
     }
 
@@ -386,7 +475,7 @@ fn perform_full_sync(
         eprintln!("Could not fix shortcuts with error {err}");
     }
 
-    if settings.steam.start_steam {
+    if manage_steam && settings.steam.start_steam {
         ensure_steam_started(&settings.steam);
     }
 
@@ -883,6 +972,7 @@ struct SettingsUpdate {
     #[serde(rename = "steamgrid_db")]
     steamgrid_db: Option<SteamGridDbUpdate>,
     blacklisted_games: Option<Vec<u32>>,
+    autosync: Option<AutosyncSettingsUpdate>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -901,6 +991,14 @@ struct SteamGridDbUpdate {
     allow_nsfw: Option<bool>,
     only_download_boilr_images: Option<bool>,
     auth_key: Option<Option<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AutosyncSettingsUpdate {
+    enabled: Option<bool>,
+    interval_minutes: Option<u64>,
+    countdown_seconds: Option<u64>,
+    start_with_windows: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -956,6 +1054,8 @@ mod tests {
                 app.manage(ProgressEmitter(Arc::new(|_, _| {})));
                 Ok(())
             })
+            // Builder-level: the mock runtime does not run `setup` before commands are invoked.
+            .manage(autosync::AutosyncHandle::unavailable())
             .invoke_handler(tauri::generate_handler![
                 load_settings,
                 discover_games,
@@ -979,7 +1079,12 @@ mod tests {
                 artwork::set_artwork_game,
                 artwork::find_missing_artwork,
                 rename_game,
-                ping
+                ping,
+                autosync::commands::autosync_prompt_info,
+                autosync::commands::autosync_restart_now,
+                autosync::commands::autosync_not_now,
+                autosync::commands::autosync_close_prompt,
+                autosync::commands::autosync_status
             ])
             .build(mock_context(noop_assets()))
             .expect("failed to build tauri app for tests");
@@ -989,16 +1094,48 @@ mod tests {
             .expect("failed to build mock webview")
     }
 
+    /// The app's own origin. Since tauri 2.12 a request from any other origin needs a
+    /// capability even for app commands, and this origin differs per platform.
+    #[cfg(windows)]
+    const LOCAL_URL: &str = "http://tauri.localhost";
+    #[cfg(not(windows))]
+    const LOCAL_URL: &str = "tauri://localhost";
+
     fn invoke_request(cmd: &str) -> InvokeRequest {
         InvokeRequest {
             cmd: cmd.into(),
             callback: CallbackFn(0),
             error: CallbackFn(1),
-            url: "http://tauri.localhost".parse().unwrap(),
+            url: LOCAL_URL.parse().unwrap(),
             body: Default::default(),
             headers: Default::default(),
             invoke_key: INVOKE_KEY.to_string(),
         }
+    }
+
+    #[test]
+    fn a_held_import_lock_refuses_a_second_import() {
+        let lock = Mutex::new(());
+        let first = try_import_lock(&lock, "busy").expect("a free lock is taken");
+        assert_eq!(
+            try_import_lock(&lock, "busy").map(|_| ()),
+            Err("busy".to_string())
+        );
+        drop(first);
+        assert!(try_import_lock(&lock, "busy").is_ok());
+    }
+
+    #[test]
+    fn a_poisoned_import_lock_is_still_taken() {
+        let lock = Arc::new(Mutex::new(()));
+        let poisoner = Arc::clone(&lock);
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoner.lock();
+            std::panic::resume_unwind(Box::new("poison the import lock"));
+        })
+        .join();
+        assert!(lock.is_poisoned());
+        assert!(try_import_lock(&lock, "busy").is_ok());
     }
 
     #[test]
@@ -1010,6 +1147,76 @@ mod tests {
             .deserialize::<String>()
             .expect("invalid ping payload");
         assert_eq!(value, "pong");
+    }
+
+    #[test]
+    fn autosync_status_reports_unavailable_without_a_runner() {
+        let webview = build_mock_webview();
+        let response = get_ipc_response(&webview, invoke_request("autosync_status"))
+            .expect("autosync_status should succeed");
+        let status = response
+            .deserialize::<autosync::runner::AutosyncStatus>()
+            .expect("status payload");
+        assert!(!status.available);
+    }
+
+    #[test]
+    fn settings_update_sets_autosync_fields() {
+        // Built from the embedded defaults, never from the user's config file.
+        let mut settings: Settings = toml::from_str(include_str!(
+            "../../../crates/boilr-core/src/defaultconfig.toml"
+        ))
+        .expect("default config fills Settings");
+        let update: SettingsUpdate = serde_json::from_value(serde_json::json!({
+            "autosync": {
+                "enabled": true,
+                "interval_minutes": 7,
+                "countdown_seconds": 30,
+                "start_with_windows": false
+            }
+        }))
+        .expect("update payload");
+        apply_settings_update(&mut settings, update);
+        assert!(settings.autosync.enabled);
+        assert_eq!(settings.autosync.interval_minutes, 7);
+        assert_eq!(settings.autosync.countdown_seconds, 30);
+        assert!(!settings.autosync.start_with_windows);
+    }
+
+    #[test]
+    fn autosync_prompt_info_is_empty_without_a_runner() {
+        let webview = build_mock_webview();
+        let response = get_ipc_response(&webview, invoke_request("autosync_prompt_info"))
+            .expect("autosync_prompt_info should succeed");
+        let info = response
+            .deserialize::<Option<autosync::runner::PromptInfo>>()
+            .expect("prompt info payload");
+        assert_eq!(info, None);
+    }
+
+    #[test]
+    fn autosync_close_prompt_refuses_other_windows() {
+        let webview = build_mock_webview();
+        let err = get_ipc_response(&webview, invoke_request("autosync_close_prompt"))
+            .expect_err("the main window must not be closable this way");
+        assert_eq!(
+            err,
+            serde_json::json!("Only the autosync prompt can be closed this way")
+        );
+    }
+
+    #[test]
+    fn autosync_answers_fail_without_a_runner() {
+        let webview = build_mock_webview();
+        for cmd in ["autosync_restart_now", "autosync_not_now"] {
+            let err = get_ipc_response(&webview, invoke_request(cmd))
+                .expect_err("the answer should fail without a runner");
+            assert_eq!(
+                err,
+                serde_json::json!("Autosync is only available on Windows"),
+                "{cmd}"
+            );
+        }
     }
 
     #[test]

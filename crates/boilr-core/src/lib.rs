@@ -9,6 +9,7 @@
 #![deny(clippy::panic)]
 #![deny(clippy::todo)]
 
+pub mod autosync;
 pub mod config;
 pub mod migration;
 pub mod settings;

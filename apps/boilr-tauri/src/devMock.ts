@@ -22,6 +22,7 @@ const game = (name: string, exe = `/games/${name}`): ShortcutSummary => ({
 let settings: Settings = {
   steam: { stop_steam: false, start_steam: false, create_collections: false, optimize_for_big_picture: false, location: null },
   steamgrid_db: { enabled: true, prefer_animated: false, allow_nsfw: false, only_download_boilr_images: false, auth_key: "sample-key" },
+  autosync: { enabled: false, interval_minutes: 5, countdown_seconds: 60, start_with_windows: true },
   blacklisted_games: [],
 };
 
@@ -38,6 +39,8 @@ let platforms: PlatformSummary[] = [
 ];
 
 const importedIds = new Set<number>();
+// The prompt view (?view=autosync-prompt) counts down from page load.
+const promptInfo = { summary: "2 new games", deadline_ms: Date.now() + 60_000 };
 const plan = (): SyncPlan => ({
   additions: platforms
     .filter((p) => p.enabled)
@@ -184,6 +187,7 @@ mockIPC(
           ...a.update,
           steam: { ...settings.steam, ...a.update?.steam },
           steamgrid_db: { ...settings.steamgrid_db, ...a.update?.steamgrid_db },
+          autosync: { ...settings.autosync, ...a.update?.autosync },
         };
         return settings;
       case "discover_games":
@@ -287,6 +291,29 @@ mockIPC(
         managed = managed.filter((m) => m.app_id !== a.appId);
         settings = { ...settings, blacklisted_games: [...(settings.blacklisted_games ?? []), a.appId] };
         return settings;
+      case "autosync_prompt_info":
+        return promptInfo;
+      case "autosync_restart_now":
+      case "autosync_not_now":
+      case "autosync_close_prompt":
+        console.info("[devMock]", cmd);
+        return null;
+      case "autosync_status":
+        return {
+          available: true,
+          enabled: Boolean(settings.autosync?.enabled),
+          paused: false,
+          summary: settings.autosync?.enabled ? "2 games pending" : "Autosync is off",
+          prompt: null,
+          steam_running: true,
+          game_signals: [
+            { signal: "game_folder_process", detail: "C:\\Games\\Celeste\\Celeste.exe" },
+            { signal: "full_screen", detail: null },
+          ],
+          syncing: false,
+          last_check_ms: Date.now() - 90_000,
+          last_check: "2 new games",
+        };
       default:
         console.warn("[devMock] unhandled command", cmd, args);
         return null;
